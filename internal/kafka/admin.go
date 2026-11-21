@@ -21,10 +21,11 @@ type TopicSpec struct {
 
 // PipelineTopics devolve os tópicos com as configurações de cada papel.
 // partitions vale para os tópicos de dados; o de checkpoint usa uma partição
-// só porque é pequeno e lido inteiro a cada rebalance.
+// só porque é pequeno e lido inteiro a cada rebalance. minInsyncReplicas <= 0
+// deixa o padrão do broker (útil em brokers que não aceitam a configuração).
 func PipelineTopics(partitions int32, minInsyncReplicas int) []TopicSpec {
 	minISR := kadm.StringPtr(fmt.Sprint(minInsyncReplicas))
-	return []TopicSpec{
+	specs := []TopicSpec{
 		{Name: schemas.TopicReadings, Partitions: partitions, Configs: map[string]*string{
 			"retention.ms": kadm.StringPtr("604800000"), "min.insync.replicas": minISR,
 		}},
@@ -41,6 +42,12 @@ func PipelineTopics(partitions int32, minInsyncReplicas int) []TopicSpec {
 			"cleanup.policy": kadm.StringPtr("compact"), "min.insync.replicas": minISR,
 		}},
 	}
+	if minInsyncReplicas <= 0 {
+		for _, s := range specs {
+			delete(s.Configs, "min.insync.replicas")
+		}
+	}
+	return specs
 }
 
 // EnsureTopics cria os tópicos que ainda não existem. É idempotente.

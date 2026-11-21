@@ -52,8 +52,14 @@ func (s *CheckpointStore) Save(ctx context.Context, cps []aggregation.Checkpoint
 	return s.client.ProduceSync(ctx, records...).FirstErr()
 }
 
+// loadTimeout limita a leitura do tópico de checkpoints: Load roda dentro do
+// callback de rebalance, que não pode ficar preso indefinidamente.
+const loadTimeout = 30 * time.Second
+
 // Load lê o tópico de checkpoints do início ao fim.
 func (s *CheckpointStore) Load(ctx context.Context) (map[aggregation.TopicPartition]aggregation.Checkpoint, error) {
+	ctx, cancel := context.WithTimeout(ctx, loadTimeout)
+	defer cancel()
 	ends, err := s.admin.ListEndOffsets(ctx, s.topic)
 	if err != nil {
 		return nil, fmt.Errorf("end offsets de %s: %w", s.topic, err)

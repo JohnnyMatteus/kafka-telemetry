@@ -105,6 +105,12 @@ func (g *GroupConsumer) Run(ctx context.Context, h Handler, obs LoopObserver) er
 		}
 		var fetchErr error
 		fetches.EachError(func(topic string, partition int32, err error) {
+			// Erros retentáveis (troca de líder ou de coordenador) o próprio
+			// cliente resolve; só os definitivos derrubam o processo.
+			if kerr.IsRetriable(err) {
+				g.logger.Warn("erro retentável no fetch", "topic", topic, "partition", partition, "error", err)
+				return
+			}
 			fetchErr = errors.Join(fetchErr, fmt.Errorf("fetch %s/%d: %w", topic, partition, err))
 		})
 		if fetchErr != nil {
