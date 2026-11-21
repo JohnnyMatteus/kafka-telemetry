@@ -320,3 +320,50 @@ func TestPipelineEndToEndWithRestart(t *testing.T) {
 		t.Errorf("segundo minuto da gh-001 = %+v, quero as leituras de antes e depois do restart", second)
 	}
 }
+
+type noThroughput struct{}
+
+func (noThroughput) PerSecond() (float64, int) { return 0, 0 }
+
+// A API de consulta lê a DLQ do broker: confere ordem (mais nova primeiro),
+// limite e leitura dos headers de origem.
+func TestInspectorReadsRecentDeadLetters(t *testing.T) {
+	e := startRedpanda(t)
+	ctx := context.Background()
+	if _, err := kafka.EnsureTopics(ctx, e.seeds, 1, kafka.PipelineTopics(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	cl, err := kgo.NewClient(kgo.SeedBrokers(e.seeds...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cl.Close()
+	for i, key := range []string{"gh-a", "gh-b", "gh-c"} {
+		rec := &kgo.Record{Topic: schemas.TopicReadingsDLQ, Key: []byte(key), Value: []byte("x"), Headers: []kgo.RecordHeader{
+			{Key: aggregation.HeaderReason, Value: []byte("INVALID_READING")},
+			{Key: aggregation.HeaderError, Value: []byte("fora da faixa")},
+			{Key: aggregation.HeaderSourceTopic, Value: []byte(schemas.TopicReadings)},
+			{Key: aggregation.HeaderSourcePartition, Value: []byte("2")},
+			{Key: aggregation.HeaderSourceOffset, Value: []byte(string(rune('0' + i)))},
+		}}
+		if err := cl.ProduceSync(ctx, rec).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	in, err := kafka.NewInspector(e.seeds, "greenhouse-aggregator", noThroughput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	got, err := in.Recent(ctx, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Key != "gh-c" || got[1].Key != "gh-b" {
+		t.Fatalf("esperado [gh-c gh-b], veio %+v", got)
+	}
+	if got[0].Reason != "INVALID_READING" || got[0].SourcePartition != 2 || got[0].SourceOffset != 2 || got[0].SourceTopic != schemas.TopicReadings {
+		t.Fatalf("headers mal lidos: %+v", got[0])
+	}
+}

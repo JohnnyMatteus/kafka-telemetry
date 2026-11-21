@@ -41,3 +41,8 @@ type Greenhouse struct {
 type Reader interface {
 	Get(ctx context.Context, greenhouseID string) (Greenhouse, error)
 }
+
+// Lister lista as estufas com estado conhecido.
+type Lister interface {
+	List(ctx context.Context) ([]Greenhouse, error)
+}

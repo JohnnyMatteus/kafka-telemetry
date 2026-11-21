@@ -4,6 +4,7 @@ package observability
 
 import (
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -21,6 +22,7 @@ type AggregatorMetrics struct {
 	aggregates prometheus.Counter
 	alerts     prometheus.Counter
 	consumed   prometheus.Counter
+	consumedN  atomic.Int64
 	lag        *prometheus.GaugeVec
 	openWin    *prometheus.GaugeVec
 	tracked    *prometheus.GaugeVec
@@ -100,7 +102,13 @@ func (m *AggregatorMetrics) Committed(tp aggregation.TopicPartition, offset int6
 func (m *AggregatorMetrics) Lag(tp aggregation.TopicPartition, lag int64) {
 	m.lag.With(labels(tp)).Set(float64(lag))
 }
-func (m *AggregatorMetrics) Consumed(n int)                { m.consumed.Add(float64(n)) }
+func (m *AggregatorMetrics) Consumed(n int) {
+	m.consumed.Add(float64(n))
+	m.consumedN.Add(int64(n))
+}
+
+// ConsumedTotal é o total lido desde o início do processo, para a API de saúde.
+func (m *AggregatorMetrics) ConsumedTotal() int64          { return m.consumedN.Load() }
 func (m *AggregatorMetrics) BatchDuration(d time.Duration) { m.batch.Observe(d.Seconds()) }
 
 // SimulatorMetrics são as métricas do produtor.

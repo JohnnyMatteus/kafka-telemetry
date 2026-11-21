@@ -103,3 +103,23 @@ func TestUpdateReportsRedisDown(t *testing.T) {
 		t.Fatal("esperava erro com o redis fora do ar")
 	}
 }
+
+func TestListReturnsAllGreenhousesSorted(t *testing.T) {
+	store, _ := newStore(t)
+	ctx := context.Background()
+	other := temperature(t0, 21)
+	other.Aggregate.Key.GreenhouseID = "gh-000"
+	if err := store.Update(ctx, []aggregation.SensorState{temperature(t0, 20), other}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].GreenhouseID != "gh-000" || got[1].GreenhouseID != "gh-001" {
+		t.Fatalf("lista = %+v", got)
+	}
+	if got[1].Sensors["TEMPERATURE"].Mean != 20 {
+		t.Fatalf("sensor = %+v", got[1].Sensors)
+	}
+}
