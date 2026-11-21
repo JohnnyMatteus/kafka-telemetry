@@ -53,9 +53,11 @@ services:
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server kafka:29092 >/dev/null 2>&1"]
-      interval: 5s
-      timeout: 10s
+      # Heap pequeno: a ferramenta do healthcheck herdaria KAFKA_HEAP_OPTS do broker.
+      test: ["CMD-SHELL", "KAFKA_HEAP_OPTS=-Xmx64m kafka-broker-api-versions --bootstrap-server kafka:29092 >/dev/null 2>&1"]
+      start_period: 20s
+      interval: 10s
+      timeout: 20s
       retries: 30
     deploy:
       resources:
@@ -116,6 +118,9 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-dev-only-minio}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-dev-only-change-me}
       MINIO_DEFAULT_BUCKETS: ${S3_BUCKET:-agrovale-telemetry-raw}
+    # A imagem para e reinicia o servidor depois de criar o bucket; em máquinas
+    # lentas o segundo start pode encontrar a porta ainda ocupada.
+    restart: unless-stopped
     volumes:
       - minio-data:/bitnami/minio/data
     healthcheck:
