@@ -43,6 +43,8 @@ make loadtest LOAD_RATE=2000 LOAD_DURATION=60s LOAD_GREENHOUSES=200
 | `internal/aggregation` | `Service` e portas |
 | `internal/kafka` | Adaptadores franz-go: `GroupConsumer`, `Publisher`, `CheckpointStore`, `Registry`, admin |
 | `internal/observability` | Prometheus, slog, OpenTelemetry |
+| `internal/state` | Último estado por estufa no Redis (`RedisStore`, decorador `Instrumented`, `GET /greenhouses/{id}/state`) |
+| `e2e/evidencia` | Evidência em vídeo com Playwright (`make evidencia`) |
 | `schemas/` | `.avsc` versionados e fixtures de mudanças incompatíveis em `testdata/` |
 | `connect/` | Dockerfile do Connect e conectores JDBC e S3 |
 | `deploy/` | DDL do Postgres, configuração e alertas do Prometheus |
