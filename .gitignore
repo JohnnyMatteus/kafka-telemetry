@@ -1,0 +1,21 @@
+# Binários e artefatos de build
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Ambiente local (nunca versionar segredos)
+.env
+.env.*
+!.env.example
+config.local.yaml
+
+# Editores e SO
+.idea/
+.vscode/
+.DS_Store
+
+# Resultados locais de teste de carga
+/loadtest-results/
