@@ -2,7 +2,7 @@
 # Use o Makefile (make up, make ps, make logs, make down) ou, direto:
 #   docker compose --profile core --profile observability up -d --build
 # Profiles:
-#   core           Kafka (KRaft), Schema Registry, Connect, Postgres, MinIO, init, simulador e agregador
+#   core           Kafka (KRaft), Schema Registry, Connect, Postgres, MinIO, Redis, init, simulador e agregador
 #   observability  Prometheus e Jaeger
 #   tools          Kafka UI
 name: kafka-telemetry
@@ -22,6 +22,7 @@ volumes:
   kafka-data:
   pgdata:
   minio-data:
+  redis-data:
   prometheus-data:
 
 services:
@@ -129,6 +130,22 @@ services:
       timeout: 5s
       retries: 30
 
+  # Projeção do último estado de cada estufa, gravada pelo agregador.
+  redis:
+    profiles: ["core"]
+    image: redis:7.4.6-alpine
+    networks: [telemetry-net]
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6380}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   connect:
     profiles: ["core"]
     build: ./connect
@@ -227,11 +244,15 @@ services:
     image: kafka-telemetry:local
     command: ["aggregator"]
     networks: [telemetry-net]
-    environment: *app-env
+    environment:
+      <<: *app-env
+      REDIS_ADDR: redis:6379
+      WINDOW_SIZE: ${WINDOW_SIZE:-1m}
     ports:
       - "${AGGREGATOR_METRICS_PORT:-9102}:9102"
     depends_on:
       init: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
     restart: unless-stopped
 
   prometheus:

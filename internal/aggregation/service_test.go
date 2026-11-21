@@ -414,3 +414,56 @@ func TestNewRequiresDependencies(t *testing.T) {
 		t.Fatal("esperava erro por dependências ausentes")
 	}
 }
+
+type stateStore struct {
+	states []aggregation.SensorState
+	err    error
+}
+
+func (s *stateStore) Update(_ context.Context, states []aggregation.SensorState) error {
+	s.states = append(s.states, states...)
+	return s.err
+}
+
+func TestStateProjectionIsUpdatedAndNeverBlocksTheCommit(t *testing.T) {
+	for name, storeErr := range map[string]error{"ok": nil, "redis fora do ar": errors.New("redis fora do ar")} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			store := &stateStore{err: storeErr}
+			svc, err := aggregation.New(
+				telemetry.WindowConfig{Size: time.Minute, AllowedLateness: 5 * time.Second},
+				telemetry.DefaultThresholds(), topics,
+				aggregation.Deps{
+					Decoder: contract.NewDecoder(h.reg), AggregateCodec: mustEncoder(t, aggregateSchemaID, schemas.TopicAggregates),
+					AlertCodec: mustEncoder(t, alertSchemaID, schemas.TopicAlerts), Publisher: h, Checkpoints: h, Committer: h,
+					State: store, Clock: func() time.Time { return t0.Add(10 * time.Minute) },
+				})
+			if err != nil {
+				t.Fatal(err)
+			}
+			batch := []aggregation.Record{
+				h.record(0, temp("a", 34, 0)),
+				h.record(1, temp("b", 36, 20*time.Second)),
+				h.record(2, temp("c", 22, 70*time.Second)),
+			}
+			if err := svc.HandleBatch(context.Background(), batch); err != nil {
+				t.Fatal(err)
+			}
+			if len(store.states) != 1 || store.states[0].Aggregate.Mean != 35 || store.states[0].Alert == nil {
+				t.Fatalf("estados = %+v, quero a janela fechada com alerta", store.states)
+			}
+			if len(h.commits) != 1 {
+				t.Fatalf("commit = %v; a projeção não pode impedir o commit", h.commits)
+			}
+		})
+	}
+}
+
+func mustEncoder(t *testing.T, id int, topic string) *contract.Encoder {
+	t.Helper()
+	enc, err := contract.NewEncoder(id, latest(t, topic))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return enc
+}

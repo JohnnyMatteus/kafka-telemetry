@@ -7,6 +7,8 @@ package aggregation
 import (
 	"context"
 	"time"
+
+	"github.com/JohnnyMatteus/kafka-telemetry/internal/telemetry"
 )
 
 // TopicPartition identifica uma partição.
@@ -65,6 +67,20 @@ type Decoder interface {
 // Encoder serializa um registro para publicação.
 type Encoder interface {
 	Encode(v any) ([]byte, error)
+}
+
+// SensorState é o último agregado de uma grandeza de uma estufa e o alerta
+// que ele gerou, se houver.
+type SensorState struct {
+	Aggregate telemetry.Aggregate
+	Alert     *telemetry.Alert
+}
+
+// StateStore guarda a projeção do último estado de cada estufa para leitura
+// rápida. É derivada dos agregados já publicados: o tópico e o Postgres
+// continuam sendo a fonte da verdade.
+type StateStore interface {
+	Update(ctx context.Context, states []SensorState) error
 }
 
 // Observer recebe os eventos relevantes para métricas.

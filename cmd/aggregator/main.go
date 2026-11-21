@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/aggregation"
@@ -19,6 +20,7 @@ import (
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/contract"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/kafka"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/observability"
+	"github.com/JohnnyMatteus/kafka-telemetry/internal/state"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/telemetry"
 	"github.com/JohnnyMatteus/kafka-telemetry/schemas"
 )
@@ -28,6 +30,7 @@ type settings struct {
 	registry       string
 	group          string
 	metricsAddr    string
+	redisAddr      string
 	maxPollRecords int
 	linger         time.Duration
 	window         telemetry.WindowConfig
@@ -59,6 +62,7 @@ func load() (settings, error) {
 		registry:       env.String("SCHEMA_REGISTRY_URL", "http://localhost:8081"),
 		group:          env.String("AGGREGATOR_GROUP", "greenhouse-aggregator"),
 		metricsAddr:    env.String("METRICS_ADDR", ":9102"),
+		redisAddr:      env.String("REDIS_ADDR", ""),
 		maxPollRecords: env.Int("MAX_POLL_RECORDS", 2000),
 		linger:         env.Duration("PRODUCER_LINGER", 5*time.Millisecond),
 		window: telemetry.WindowConfig{
@@ -108,6 +112,16 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 	}
 	defer consumer.Close()
 
+	var stateStore aggregation.StateStore
+	var routes []observability.Route
+	if s.redisAddr != "" {
+		rdb := redis.NewClient(&redis.Options{Addr: s.redisAddr})
+		defer func() { _ = rdb.Close() }()
+		store := state.NewRedisStore(rdb)
+		stateStore = state.NewInstrumented(store, reg)
+		routes = append(routes, observability.Route{Pattern: "GET /greenhouses/{id}/state", Handler: state.Handler(store, logger)})
+	}
+
 	svc, err := aggregation.New(s.window, telemetry.DefaultThresholds(),
 		aggregation.Topics{Aggregates: schemas.TopicAggregates, Alerts: schemas.TopicAlerts, DLQ: schemas.TopicReadingsDLQ},
 		aggregation.Deps{
@@ -117,6 +131,7 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 			Publisher:      kafka.NewPublisher(consumer.Client()),
 			Checkpoints:    kafka.NewCheckpointStore(consumer.Client(), s.brokers, schemas.TopicCheckpoints),
 			Committer:      consumer,
+			State:          stateStore,
 			Observer:       metrics,
 			Logger:         logger,
 		})
@@ -125,7 +140,7 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return observability.Serve(gctx, s.metricsAddr, reg, logger) })
+	g.Go(func() error { return observability.Serve(gctx, s.metricsAddr, reg, logger, routes...) })
 	g.Go(func() error {
 		logger.Info("agregador iniciado", "group", s.group, "window", s.window.Size.String(),
 			"allowed_lateness", s.window.AllowedLateness.String(), "brokers", s.brokers)

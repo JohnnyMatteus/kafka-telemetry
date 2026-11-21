@@ -43,6 +43,7 @@ type Deps struct {
 	Publisher       Publisher
 	Checkpoints     CheckpointStore
 	Committer       Committer
+	State           StateStore
 	Observer        Observer
 	Logger          *slog.Logger
 	Clock           func() time.Time
@@ -139,6 +140,8 @@ func (s *Service) Drop(tps []TopicPartition) {
 
 // HandleBatch processa um lote de registros. A ordem é o que dá a garantia:
 // publicar DLQ, agregados e alertas (com ack) -> gravar checkpoint -> commitar.
+// A projeção do último estado é atualizada depois do publish e não participa
+// da garantia.
 // Qualquer erro devolvido deixa o offset sem commit; o processo deve parar e
 // o próximo dono da partição reprocessa a partir do último commit.
 func (s *Service) HandleBatch(ctx context.Context, records []Record) error {
@@ -163,17 +166,18 @@ func (s *Service) HandleBatch(ctx context.Context, records []Record) error {
 	}
 
 	tps := make([]TopicPartition, 0, len(touched))
-	aggregates, alerts := 0, 0
+	var states []SensorState
+	alerts := 0
 	for tp := range touched {
 		tps = append(tps, tp)
 		for _, agg := range s.partitions[tp].CloseReady() {
-			msgs, alerted, err := s.emit(agg)
+			msgs, state, err := s.emit(agg)
 			if err != nil {
 				return err
 			}
 			out = append(out, msgs...)
-			aggregates++
-			if alerted {
+			states = append(states, state)
+			if state.Alert != nil {
 				alerts++
 			}
 		}
@@ -184,7 +188,8 @@ func (s *Service) HandleBatch(ctx context.Context, records []Record) error {
 			return fmt.Errorf("publicar %d mensagens: %w", len(out), err)
 		}
 	}
-	s.deps.Observer.Emitted(aggregates, alerts)
+	s.deps.Observer.Emitted(len(states), alerts)
+	s.updateState(ctx, states)
 	return s.checkpointAndCommit(ctx, tps)
 }
 
@@ -274,24 +279,38 @@ func (s *Service) deadLetter(rec Record, reason string, cause error) *Message {
 	}
 }
 
-func (s *Service) emit(agg telemetry.Aggregate) ([]Message, bool, error) {
+// updateState atualiza a projeção depois do publish. Uma falha só é
+// registrada: a projeção se corrige na próxima janela, e travar o pipeline
+// por ela atrasaria agregados, alertas e o commit.
+func (s *Service) updateState(ctx context.Context, states []SensorState) {
+	if s.deps.State == nil || len(states) == 0 {
+		return
+	}
+	if err := s.deps.State.Update(ctx, states); err != nil {
+		s.deps.Logger.Warn("falha ao atualizar o último estado das estufas", "states", len(states), "error", err)
+	}
+}
+
+func (s *Service) emit(agg telemetry.Aggregate) ([]Message, SensorState, error) {
+	state := SensorState{Aggregate: agg}
 	key := []byte(agg.Key.GreenhouseID)
 	value, err := s.deps.AggregateCodec.Encode(contract.NewWindowAggregateRecord(agg))
 	if err != nil {
-		return nil, false, fmt.Errorf("serializar agregado: %w", err)
+		return nil, state, fmt.Errorf("serializar agregado: %w", err)
 	}
 	msgs := []Message{{Topic: s.topics.Aggregates, Key: key, Value: value}}
 	alert, ok := s.thresholds.Evaluate(agg)
 	if !ok {
-		return msgs, false, nil
+		return msgs, state, nil
 	}
+	state.Alert = &alert
 	value, err = s.deps.AlertCodec.Encode(contract.NewThresholdAlertRecord(alert))
 	if err != nil {
-		return nil, false, fmt.Errorf("serializar alerta: %w", err)
+		return nil, state, fmt.Errorf("serializar alerta: %w", err)
 	}
 	s.deps.Logger.Info("limite ultrapassado", "greenhouse_id", alert.GreenhouseID, "sensor_type", alert.Type,
 		"rule", alert.Rule, "observed", alert.Observed, "limit", alert.Limit, "window_start", alert.WindowStart)
-	return append(msgs, Message{Topic: s.topics.Alerts, Key: key, Value: value}), true, nil
+	return append(msgs, Message{Topic: s.topics.Alerts, Key: key, Value: value}), state, nil
 }
 
 func (s *Service) checkpointAndCommit(ctx context.Context, tps []TopicPartition) error {

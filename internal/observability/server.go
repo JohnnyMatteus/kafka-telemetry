@@ -25,9 +25,18 @@ func NewRegistry() *prometheus.Registry {
 	return reg
 }
 
-// Serve expõe /metrics e /healthz até o contexto acabar.
-func Serve(ctx context.Context, addr string, reg *prometheus.Registry, logger *slog.Logger) error {
+// Route é uma rota extra servida ao lado de /metrics.
+type Route struct {
+	Pattern string
+	Handler http.Handler
+}
+
+// Serve expõe /metrics, /healthz e as rotas extras até o contexto acabar.
+func Serve(ctx context.Context, addr string, reg *prometheus.Registry, logger *slog.Logger, routes ...Route) error {
 	mux := http.NewServeMux()
+	for _, r := range routes {
+		mux.Handle(r.Pattern, r.Handler)
+	}
 	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -40,7 +49,7 @@ func Serve(ctx context.Context, addr string, reg *prometheus.Registry, logger *s
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()
-	logger.Info("servidor de métricas no ar", "addr", addr)
+	logger.Info("servidor HTTP no ar", "addr", addr)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
