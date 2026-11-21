@@ -68,6 +68,10 @@ Se o checkpoint fosse gravado antes do publish, um crash no meio descartaria jan
 
 `BlockRebalanceOnPoll` impede rebalance no meio de um lote. No revoke, o agregador commita o offset seguro e descarta o estado das partições; o novo dono reconstrói as janelas abertas a partir do checkpoint. Partições *perdidas* (sessão expirou) são descartadas sem commit, porque outra instância pode já ser dona delas.
 
+#### Parada
+
+No SIGTERM, o lote em andamento termina antes de o agregador sair (até `ShutdownGrace`, 10 s): cortar no meio deixaria agregados publicados sem checkpoint. Se um lote falhar, o revoke disparado pelo `Close` descarta o estado em vez de commitar, porque janelas fechadas e não publicadas fariam o offset avançar sobre leituras que nunca viraram agregado.
+
 #### Erro transitório versus mensagem inválida
 
 Mandar para a DLQ porque o Schema Registry caiu descartaria mensagens válidas. O decoder classifica:

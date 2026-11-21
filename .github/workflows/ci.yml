@@ -61,9 +61,6 @@ jobs:
     name: Testes de integração (Redpanda)
     runs-on: ubuntu-latest
     needs: [test]
-    # O teste ponta a ponta com restart ainda não foi validado fora da máquina
-    # do autor; até a primeira execução verde, não bloqueia o merge.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
