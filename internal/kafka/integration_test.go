@@ -292,13 +292,24 @@ func TestPipelineEndToEndWithRestart(t *testing.T) {
 	}
 
 	// Offsets commitados param no início das janelas abertas (segundo minuto).
+	// O commit acontece depois de publicar e gravar o checkpoint, então pode
+	// chegar alguns instantes depois dos agregados: espera com prazo.
 	admin := kadm.NewClient(p.producer)
-	offsets, err := admin.FetchOffsets(context.Background(), "it-aggregator")
-	if err != nil || offsets.Error() != nil {
-		t.Fatalf("fetch offsets: %v %v", err, offsets.Error())
+	var offsets kadm.OffsetResponses
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var err error
+		offsets, err = admin.FetchOffsets(context.Background(), "it-aggregator")
+		if err != nil || offsets.Error() != nil {
+			t.Fatalf("fetch offsets: %v %v", err, offsets.Error())
+		}
+		if len(offsets) > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
 	if len(offsets) == 0 {
-		t.Fatal("nenhum offset commitado")
+		t.Fatal("nenhum offset commitado em 30 s")
 	}
 	stop()
 
