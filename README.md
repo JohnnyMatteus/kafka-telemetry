@@ -25,6 +25,8 @@ flowchart LR
     AGG --> AL[(greenhouse.alerts)]
     AGG --> DLQ[(greenhouse.readings.dlq)]
     AGG --> CP[(checkpoints<br/>compactado)]
+    AGG -.->|último estado| RD[(Redis)]
+    RD --> API[GET /greenhouses/id/state]
     AG --> JDBC[Connect JDBC sink<br/>upsert]
     AL --> JDBC
     JDBC --> PG[(Postgres)]
@@ -38,7 +40,7 @@ flowchart LR
 - **Kafka Connect**: sink JDBC com upsert para o Postgres e sink S3 em Parquet para o MinIO, ambos versionados em `connect/`.
 - **telemetryctl**: cria tópicos e registra os schemas com compatibilidade BACKWARD.
 
-Detalhes em [docs/design-doc.md](docs/design-doc.md).
+Detalhes em [docs/design-doc.md](docs/design-doc.md); padrões e SOLID com o trecho de código de cada um em [docs/arquitetura/padroes.md](docs/arquitetura/padroes.md).
 
 ## Núcleo
 
@@ -78,6 +80,7 @@ docker compose exec minio mc ls --recursive local/agrovale-telemetry-raw | head
 | Jaeger (com `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318`) | http://localhost:16686 |
 | Console do MinIO (`dev-only-minio` / `dev-only-change-me`) | http://localhost:9001 |
 | Kafka UI (`make up-tools`) | http://localhost:8080 |
+| Último estado de uma estufa (Redis) | http://localhost:9102/greenhouses/gh-001/state |
 
 Outros alvos: `make seed` (reaplica tópicos, schemas e conectores e injeta 30 s de leituras), `make down`, `make clean` (remove volumes), `make up-portfolio` (liga à rede compartilhada `portfolio-net` do ecossistema).
 
@@ -89,6 +92,16 @@ go run ./cmd/telemetryctl init
 go run ./cmd/aggregator &
 go run ./cmd/simulator -greenhouses 50 -rate 500 -duration 2m
 ```
+
+## Evidência
+
+Um vídeo gravado com Playwright percorre o fluxo principal com a stack real: tópicos e schemas (BACKWARD), leituras particionadas por estufa na Kafka UI, agregados no tópico e no Postgres, alerta, DLQ com o motivo no header, retransmissão deduplicada, último estado no Redis, schema incompatível recusado pelo registry, lag e throughput no Prometheus e Parquet no MinIO.
+
+```bash
+make evidencia   # sobe tudo (simulador a 400 leituras/s), espera os conectores e roda e2e/evidencia
+```
+
+O vídeo fica em `e2e/evidencia/test-results/`. Se alguma porta estiver ocupada, exporte a variável correspondente de `.env.example` (ex.: `AGGREGATOR_METRICS_PORT=9112`) antes do comando.
 
 ## Como testar
 
@@ -121,6 +134,7 @@ Resultado do teste de carga e métricas observadas: [docs/teste-de-carga.md](doc
 | [0006](docs/adr/0006-kafka-kraft-e-redpanda-nos-testes.md) | Kafka KRaft no compose, Redpanda nos testes |
 | [0007](docs/adr/0007-data-lake-no-minio-com-s3-sink.md) | Data lake no MinIO com S3 sink em Parquet |
 | [0008](docs/adr/0008-sink-jdbc-upsert-no-postgres.md) | Sink JDBC com upsert no Postgres |
+| [0009](docs/adr/0009-ultimo-estado-no-redis.md) | Último estado de cada estufa no Redis, fora da garantia de entrega |
 
 ## Trade-offs
 
@@ -134,7 +148,6 @@ Resultado do teste de carga e métricas observadas: [docs/teste-de-carga.md](doc
 ## Próximos passos
 
 - Rodar `make loadtest` numa máquina dedicada e registrar as métricas em [docs/teste-de-carga.md](docs/teste-de-carga.md) (a rodada formal foi adiada para economizar recursos).
-- Validar o S3 sink em Parquet no MinIO com o ambiente completo (configuração versionada, ainda não exercitada ponta a ponta).
 - Watermark ocioso (por tempo de processamento) e watermark por estufa.
 - Reprocessador da DLQ e consumidor de alertas que notifica o produtor rural.
 - SASL/mTLS, ACLs por serviço e registry autenticado.
@@ -153,10 +166,12 @@ internal/
   kafka/        adaptadores franz-go e Schema Registry
   simulator/    gerador de leituras
   observability/ métricas, logs, tracing
+  state/        último estado por estufa no Redis e endpoint de leitura
 schemas/        contratos Avro versionados + fixtures de mudanças incompatíveis
 connect/        imagem do Connect e conectores JDBC e S3
 deploy/         Postgres (DDL) e Prometheus (scrape e alertas)
-docs/           design doc, ADRs, roteiros, observabilidade, teste de carga
+docs/           design doc, ADRs, padrões, roteiros, observabilidade, teste de carga
+e2e/evidencia/  evidência em vídeo com Playwright
 ```
 
 ## Cursos exercitados

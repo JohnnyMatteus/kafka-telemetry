@@ -86,6 +86,10 @@ test-integration: ## Testes de integração (Redpanda via testcontainers; pula s
 schemas-check: ## Portão de compatibilidade dos schemas, sem rede
 	go run ./cmd/telemetryctl schemas check
 
+.PHONY: evidencia
+evidencia: ## Sobe tudo e grava a evidência em vídeo (Playwright, e2e/evidencia)
+	./scripts/evidencia.sh
+
 .PHONY: loadtest
 loadtest: ## Teste de carga contra o ambiente local (LOAD_RATE, LOAD_DURATION, LOAD_GREENHOUSES)
 	./scripts/load-test.sh $(LOAD_RATE) $(LOAD_DURATION) $(LOAD_GREENHOUSES)
