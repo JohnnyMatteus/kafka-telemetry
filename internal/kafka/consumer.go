@@ -23,10 +23,12 @@ type Handler interface {
 	HandleBatch(ctx context.Context, records []aggregation.Record) error
 }
 
-// LagObserver recebe o lag de cada partição a cada poll.
-type LagObserver interface {
+// LoopObserver recebe as métricas do laço de consumo: lag por partição,
+// registros consumidos e duração de cada lote.
+type LoopObserver interface {
 	Lag(tp aggregation.TopicPartition, lag int64)
 	Consumed(n int)
+	BatchDuration(d time.Duration)
 }
 
 // GroupConsumerConfig configura o consumidor em grupo.
@@ -86,7 +88,7 @@ func (g *GroupConsumer) Client() *kgo.Client { return g.client }
 // Run consome até o contexto acabar ou um erro fatal acontecer. Um erro de
 // processamento encerra o laço sem commit: o processo deve terminar e o
 // orquestrador reiniciá-lo, retomando do último offset commitado.
-func (g *GroupConsumer) Run(ctx context.Context, h Handler, lag LagObserver) error {
+func (g *GroupConsumer) Run(ctx context.Context, h Handler, obs LoopObserver) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	g.mu.Lock()
@@ -118,16 +120,20 @@ func (g *GroupConsumer) Run(ctx context.Context, h Handler, lag LagObserver) err
 					TopicPartition: tp, Offset: r.Offset, Key: r.Key, Value: r.Value, Timestamp: r.Timestamp,
 				})
 			}
-			if n := len(p.Records); n > 0 && lag != nil {
-				lag.Lag(tp, max(p.HighWatermark-(p.Records[n-1].Offset+1), 0))
+			if n := len(p.Records); n > 0 && obs != nil {
+				obs.Lag(tp, max(p.HighWatermark-(p.Records[n-1].Offset+1), 0))
 			}
 		})
-		if lag != nil {
-			lag.Consumed(len(batch))
+		if obs != nil {
+			obs.Consumed(len(batch))
 		}
+		start := time.Now()
 		if err := h.HandleBatch(ctx, batch); err != nil {
 			g.client.AllowRebalance()
 			return fmt.Errorf("processar lote: %w", err)
+		}
+		if obs != nil {
+			obs.BatchDuration(time.Since(start))
 		}
 		g.client.AllowRebalance()
 	}
