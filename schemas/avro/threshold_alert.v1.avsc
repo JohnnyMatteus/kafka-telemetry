@@ -1,0 +1,16 @@
+{
+  "type": "record",
+  "name": "ThresholdAlert",
+  "namespace": "com.example.agrovale.telemetry",
+  "doc": "Alerta emitido quando a média de uma janela sai do limite agronômico. Chave: greenhouse_id.",
+  "fields": [
+    {"name": "alert_id", "type": "string", "doc": "Determinístico por janela e regra; consumidores deduplicam por ele."},
+    {"name": "greenhouse_id", "type": "string"},
+    {"name": "sensor_type", "type": "string"},
+    {"name": "window_start", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "window_end", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "rule", "type": "string", "doc": "ABOVE_MAX ou BELOW_MIN."},
+    {"name": "observed_value", "type": "double"},
+    {"name": "limit_value", "type": "double"}
+  ]
+}

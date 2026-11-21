@@ -1,0 +1,15 @@
+{
+  "type": "record",
+  "name": "SensorReading",
+  "namespace": "com.example.agrovale.telemetry",
+  "doc": "Leitura única de um sensor de estufa. Chave da mensagem: greenhouse_id.",
+  "fields": [
+    {"name": "event_id", "type": {"type": "string", "logicalType": "uuid"}, "doc": "Identificador único do evento, usado para deduplicação."},
+    {"name": "greenhouse_id", "type": "string", "doc": "Estufa de origem; também é a chave de partição."},
+    {"name": "sensor_id", "type": "string"},
+    {"name": "sensor_type", "type": {"type": "enum", "name": "SensorType", "symbols": ["UNKNOWN", "TEMPERATURE", "HUMIDITY", "CO2", "LUMINOSITY"], "default": "UNKNOWN"}},
+    {"name": "value", "type": "double"},
+    {"name": "unit", "type": "string", "doc": "celsius, percent, ppm ou lux."},
+    {"name": "measured_at", "type": {"type": "long", "logicalType": "timestamp-millis"}, "doc": "Horário da medição no sensor (tempo de evento)."}
+  ]
+}

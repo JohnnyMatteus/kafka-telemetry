@@ -1,0 +1,17 @@
+{
+  "type": "record",
+  "name": "WindowAggregate",
+  "namespace": "com.example.agrovale.telemetry",
+  "doc": "Agregado de uma janela tumbling de 1 minuto por estufa e grandeza. Chave: greenhouse_id.",
+  "fields": [
+    {"name": "greenhouse_id", "type": "string"},
+    {"name": "sensor_type", "type": "string", "doc": "String, e não enum, para facilitar o sink JDBC."},
+    {"name": "window_start", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "window_end", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "sample_count", "type": "int"},
+    {"name": "min_value", "type": "double"},
+    {"name": "max_value", "type": "double"},
+    {"name": "mean_value", "type": "double"},
+    {"name": "unit", "type": "string"}
+  ]
+}
