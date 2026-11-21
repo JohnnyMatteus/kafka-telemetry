@@ -14,7 +14,6 @@ LOAD_GREENHOUSES ?= 200
 help: ## Lista os alvos
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-## ---- Ambiente local -------------------------------------------------------
 
 .PHONY: up
 up: ## Sobe núcleo + observabilidade (Kafka KRaft, Schema Registry, Connect, Postgres, MinIO, apps, Prometheus, Jaeger)
@@ -57,7 +56,6 @@ network: ## Cria a rede compartilhada do ecossistema (portfolio-net)
 up-portfolio: network ## Sobe o ambiente também ligado à portfolio-net
 	$(COMPOSE) -f docker-compose.yml -f docker-compose.portfolio.yml $(PROFILES) up -d --build
 
-## ---- Desenvolvimento ------------------------------------------------------
 
 .PHONY: build
 build: ## Compila os binários em ./bin
