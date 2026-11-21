@@ -133,6 +133,9 @@ Resultado do teste de carga e métricas observadas: [docs/teste-de-carga.md](doc
 
 ## Próximos passos
 
+- Rodar `make loadtest` numa máquina dedicada e registrar as métricas em [docs/teste-de-carga.md](docs/teste-de-carga.md) (a rodada formal foi adiada para economizar recursos).
+- Confirmar no CI o teste ponta a ponta com restart (`TestPipelineEndToEndWithRestart`) e então retirar o `continue-on-error` do job de integração.
+- Validar o S3 sink em Parquet no MinIO com o ambiente completo (configuração versionada, ainda não exercitada ponta a ponta).
 - Watermark ocioso (por tempo de processamento) e watermark por estufa.
 - Reprocessador da DLQ e consumidor de alertas que notifica o produtor rural.
 - SASL/mTLS, ACLs por serviço e registry autenticado.

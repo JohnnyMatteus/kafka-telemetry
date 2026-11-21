@@ -227,6 +227,7 @@ Detalhes em [observabilidade.md](observabilidade.md).
 
 ## 11. Plano de evolução
 
+0. **Pendências da fundação**: rodada formal do teste de carga, confirmação no CI do teste ponta a ponta com restart (job de integração ainda com `continue-on-error`) e validação do S3 sink no MinIO com o ambiente completo.
 1. **Watermark ocioso**: avançar o watermark por tempo de processamento quando uma partição fica sem tráfego.
 2. **Watermark por estufa** para isolar sensores com relógio adiantado.
 3. **Reprocessador da DLQ**: ferramenta que corrige e republica mensagens da DLQ.
