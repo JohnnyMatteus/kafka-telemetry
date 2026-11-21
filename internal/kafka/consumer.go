@@ -97,10 +97,15 @@ func (g *GroupConsumer) Run(ctx context.Context, h Handler, obs LoopObserver) er
 
 	for {
 		fetches := g.client.PollRecords(ctx, g.cfg.MaxPollRecords)
+		// Todo poll que devolve um fetch (inclusive o de contexto cancelado)
+		// bloqueia rebalances até AllowRebalance; sem liberar, o Close e o
+		// LeaveGroup ficariam presos esperando.
 		if err := g.fatalErr(); err != nil {
+			g.client.AllowRebalance()
 			return err
 		}
 		if fetches.IsClientClosed() || ctx.Err() != nil {
+			g.client.AllowRebalance()
 			return nil
 		}
 		var fetchErr error
