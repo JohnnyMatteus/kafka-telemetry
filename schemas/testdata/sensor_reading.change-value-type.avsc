@@ -1,0 +1,57 @@
+{
+  "type": "record",
+  "name": "SensorReading",
+  "namespace": "com.example.agrovale.telemetry",
+  "doc": "Inválido em BACKWARD: value de double para string.",
+  "fields": [
+    {
+      "name": "event_id",
+      "type": {
+        "type": "string",
+        "logicalType": "uuid"
+      },
+      "doc": "Identificador único do evento, usado para deduplicação."
+    },
+    {
+      "name": "greenhouse_id",
+      "type": "string",
+      "doc": "Estufa de origem; também é a chave de partição."
+    },
+    {
+      "name": "sensor_id",
+      "type": "string"
+    },
+    {
+      "name": "sensor_type",
+      "type": {
+        "type": "enum",
+        "name": "SensorType",
+        "symbols": [
+          "UNKNOWN",
+          "TEMPERATURE",
+          "HUMIDITY",
+          "CO2",
+          "LUMINOSITY"
+        ],
+        "default": "UNKNOWN"
+      }
+    },
+    {
+      "name": "value",
+      "type": "string"
+    },
+    {
+      "name": "unit",
+      "type": "string",
+      "doc": "celsius, percent, ppm ou lux."
+    },
+    {
+      "name": "measured_at",
+      "type": {
+        "type": "long",
+        "logicalType": "timestamp-millis"
+      },
+      "doc": "Horário da medição no sensor (tempo de evento)."
+    }
+  ]
+}

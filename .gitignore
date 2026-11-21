@@ -19,3 +19,8 @@ config.local.yaml
 
 # Resultados locais de teste de carga
 /loadtest-results/
+
+# Evidência em vídeo (Playwright)
+/e2e/evidencia/node_modules/
+/e2e/evidencia/test-results/
+/e2e/evidencia/playwright-report/

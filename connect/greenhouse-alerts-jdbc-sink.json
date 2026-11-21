@@ -1,0 +1,23 @@
+{
+  "connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector",
+  "tasks.max": "1",
+  "topics": "greenhouse.alerts",
+  "connection.url": "jdbc:postgresql://postgres:5432/telemetry",
+  "connection.user": "${env:JDBC_SINK_USER}",
+  "connection.password": "${env:JDBC_SINK_PASSWORD}",
+  "table.name.format": "greenhouse_alerts",
+  "insert.mode": "upsert",
+  "pk.mode": "record_value",
+  "pk.fields": "alert_id",
+  "auto.create": "false",
+  "auto.evolve": "false",
+  "db.timezone": "UTC",
+  "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+  "value.converter": "io.confluent.connect.avro.AvroConverter",
+  "value.converter.schema.registry.url": "http://schema-registry:8081",
+  "errors.tolerance": "all",
+  "errors.log.enable": "true",
+  "errors.deadletterqueue.topic.name": "greenhouse.alerts.connect-dlq",
+  "errors.deadletterqueue.topic.replication.factor": "1",
+  "errors.deadletterqueue.context.headers.enable": "true"
+}

@@ -1,0 +1,21 @@
+groups:
+  - name: telemetry-pipeline
+    rules:
+      - alert: AggregatorLagHigh
+        expr: sum(telemetry_aggregator_consumer_lag) > 10000
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Agregador acumulando lag ({{ $value }} registros)"
+      - alert: AggregatorStalled
+        expr: rate(telemetry_aggregator_records_consumed_total[2m]) == 0 and rate(telemetry_simulator_readings_produced_total[2m]) > 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Leituras chegando e o agregador sem consumir"
+      - alert: DeadLetterRateHigh
+        expr: sum(rate(telemetry_aggregator_dead_letters_total[5m])) / sum(rate(telemetry_aggregator_records_consumed_total[5m])) > 0.05
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Mais de 5% das leituras indo para a DLQ"
