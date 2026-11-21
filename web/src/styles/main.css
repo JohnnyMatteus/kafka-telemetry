@@ -1,0 +1,15 @@
+:root { font-variation-settings: 'wdth' 100; }
+body { font-variation-settings: 'wdth' 100; }
+h1, h2, h3, .title-wide { font-variation-settings: 'wdth' 112; font-weight: 700; letter-spacing: 0; }
+.label-narrow { font-variation-settings: 'wdth' 75; font-weight: 600; font-size: 11px; line-height: 14px; }
+.reading { font-family: 'Azeret Mono', ui-monospace, monospace; font-weight: 500; font-size: 13px; font-variant-numeric: tabular-nums; }
+.tnum { font-variant-numeric: tabular-nums; }
+:focus-visible { outline: 2px solid rgb(var(--v-theme-accent)); outline-offset: 2px; }
+
+.tile { transition: none; }
+.tile-flash { animation: tile-flash 700ms ease-out 1; }
+@keyframes tile-flash { 0% { outline: 3px solid rgb(var(--v-theme-on-surface)); } 100% { outline: 3px solid transparent; } }
+@media (prefers-reduced-motion: reduce) {
+  .tile-flash { animation: none; }
+  * { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
+}
