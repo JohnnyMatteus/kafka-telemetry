@@ -2,6 +2,7 @@
 // compatibilidade dos schemas do repositório e registra os schemas no
 // Schema Registry com compatibilidade BACKWARD.
 //
+//	telemetryctl init              topics + schemas register, para o docker-compose
 //	telemetryctl topics            cria os tópicos (idempotente)
 //	telemetryctl schemas check     confere compatibilidade localmente, sem rede
 //	telemetryctl schemas register  configura BACKWARD, pergunta ao registry e registra
@@ -24,21 +25,25 @@ import (
 )
 
 const usage = `uso:
+  telemetryctl init
   telemetryctl topics [-partitions N] [-replication N] [-min-isr N]
   telemetryctl schemas check
   telemetryctl schemas register
 
 variáveis: KAFKA_BROKERS (localhost:9092), SCHEMA_REGISTRY_URL (http://localhost:8081)`
 
-func main() {
+func main() { os.Exit(realMain()) }
+
+func realMain() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	if err := run(ctx, os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "erro:", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 func run(ctx context.Context, args []string) error {
@@ -52,6 +57,11 @@ func run(ctx context.Context, args []string) error {
 		return errors.New(usage)
 	}
 	switch {
+	case len(args) == 1 && args[0] == "init":
+		if err := topics(ctx, brokers, nil); err != nil {
+			return err
+		}
+		return register(ctx, registryURL)
 	case args[0] == "topics":
 		return topics(ctx, brokers, args[1:])
 	case len(args) == 2 && args[0] == "schemas" && args[1] == "check":

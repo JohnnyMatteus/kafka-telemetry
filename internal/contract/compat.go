@@ -72,5 +72,5 @@ func wrapIncompatible(err error, level string, version int) error {
 	if err == nil {
 		return nil
 	}
-	return fmt.Errorf("%w: %s em relação à versão %d: %v", ErrIncompatible, level, version, err)
+	return fmt.Errorf("%w: %s em relação à versão %d: %w", ErrIncompatible, level, version, err)
 }

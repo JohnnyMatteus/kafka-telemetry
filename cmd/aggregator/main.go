@@ -33,20 +33,23 @@ type settings struct {
 	window         telemetry.WindowConfig
 }
 
-func main() {
+func main() { os.Exit(realMain()) }
+
+func realMain() int {
 	logger := observability.NewLogger("aggregator")
 	s, err := load()
 	if err != nil {
 		logger.Error("configuração inválida", "error", err)
-		os.Exit(2)
+		return 2
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, s, logger); err != nil {
 		logger.Error("agregador encerrado com erro", "error", err)
-		os.Exit(1)
+		return 1
 	}
 	logger.Info("agregador encerrado")
+	return 0
 }
 
 func load() (settings, error) {

@@ -75,7 +75,7 @@ func (d *Decoder) Decode(ctx context.Context, b []byte, v any) error {
 		return err
 	}
 	if err := avro.Unmarshal(schema, payload, v); err != nil {
-		return fmt.Errorf("%w: schema %d: %v", ErrMalformed, id, err)
+		return fmt.Errorf("%w: schema %d: %w", ErrMalformed, id, err)
 	}
 	return nil
 }
@@ -94,7 +94,7 @@ func (d *Decoder) writerSchema(ctx context.Context, id uint32) (avro.Schema, err
 	}
 	s, err = avro.Parse(text)
 	if err != nil {
-		return nil, fmt.Errorf("%w: schema %d não é Avro válido: %v", ErrMalformed, id, err)
+		return nil, fmt.Errorf("%w: schema %d não é Avro válido: %w", ErrMalformed, id, err)
 	}
 	d.mu.Lock()
 	d.cache[id] = s

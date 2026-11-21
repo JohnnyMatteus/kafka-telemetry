@@ -38,19 +38,22 @@ type options struct {
 	sim         simulator.Config
 }
 
-func main() {
+func main() { os.Exit(realMain()) }
+
+func realMain() int {
 	logger := observability.NewLogger("simulator")
 	opts, err := parseOptions()
 	if err != nil {
 		logger.Error("configuração inválida", "error", err)
-		os.Exit(2)
+		return 2
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, opts, logger); err != nil {
 		logger.Error("simulador encerrado com erro", "error", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 func parseOptions() (options, error) {

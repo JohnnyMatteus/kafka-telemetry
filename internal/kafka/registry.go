@@ -29,7 +29,7 @@ func (r *Registry) SchemaByID(ctx context.Context, id int) (string, error) {
 	s, err := r.client.SchemaByID(ctx, id)
 	if err != nil {
 		if isCode(err, sr.ErrSchemaNotFound.Code) {
-			return "", fmt.Errorf("%w: %v", contract.ErrUnknownSchema, err)
+			return "", fmt.Errorf("%w: %w", contract.ErrUnknownSchema, err)
 		}
 		return "", err
 	}

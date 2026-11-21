@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -372,7 +373,7 @@ func TestRestartFromCheckpointDoesNotReemitClosedWindows(t *testing.T) {
 	if err := restarted.Assign(context.Background(), []aggregation.TopicPartition{tp}); err != nil {
 		t.Fatal(err)
 	}
-	replay := append(all[committed:], h.record(5, temp("f", 21, 130*time.Second)))
+	replay := slices.Concat(all[committed:], []aggregation.Record{h.record(5, temp("f", 21, 130*time.Second))})
 	if err := restarted.HandleBatch(context.Background(), replay); err != nil {
 		t.Fatal(err)
 	}
