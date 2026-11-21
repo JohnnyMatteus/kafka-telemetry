@@ -39,6 +39,9 @@ type GroupConsumerConfig struct {
 	MaxPollRecords int
 	Linger         time.Duration
 	Hooks          []kgo.Hook
+	// ShutdownGrace é quanto o lote em andamento ainda pode levar depois do
+	// pedido de parada. Padrão: 10 s.
+	ShutdownGrace time.Duration
 }
 
 // GroupConsumer consome em grupo com commit manual. Também implementa
@@ -52,11 +55,18 @@ type GroupConsumer struct {
 	handler Handler
 	fatal   error
 	cancel  context.CancelFunc
+	// poisoned marca que um lote falhou no meio: o estado em memória pode ter
+	// janelas fechadas que não foram publicadas, então o revoke do Close não
+	// pode commitar a partir dele.
+	poisoned bool
 }
 
 // NewGroupConsumer cria o cliente. O mesmo cliente produz agregados, alertas,
 // DLQ e checkpoints, com as opções de produtor idempotente.
 func NewGroupConsumer(cfg GroupConsumerConfig, logger *slog.Logger) (*GroupConsumer, error) {
+	if cfg.ShutdownGrace <= 0 {
+		cfg.ShutdownGrace = 10 * time.Second
+	}
 	g := &GroupConsumer{cfg: cfg, logger: logger}
 	opts := append([]kgo.Opt{
 		kgo.SeedBrokers(cfg.Seeds...),
@@ -139,7 +149,8 @@ func (g *GroupConsumer) Run(ctx context.Context, h Handler, obs LoopObserver) er
 			obs.Consumed(len(batch))
 		}
 		start := time.Now()
-		if err := h.HandleBatch(ctx, batch); err != nil {
+		if err := g.handleBatch(ctx, h, batch); err != nil {
+			g.poison()
 			g.client.AllowRebalance()
 			return fmt.Errorf("processar lote: %w", err)
 		}
@@ -148,6 +159,17 @@ func (g *GroupConsumer) Run(ctx context.Context, h Handler, obs LoopObserver) er
 		}
 		g.client.AllowRebalance()
 	}
+}
+
+// handleBatch deixa o lote em andamento terminar quando a parada é pedida:
+// cortar no meio deixaria agregados publicados sem checkpoint, e o próximo
+// dono os publicaria de novo. O prazo ShutdownGrace limita a espera.
+func (g *GroupConsumer) handleBatch(ctx context.Context, h Handler, batch []aggregation.Record) error {
+	batchCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancel()
+	stop := context.AfterFunc(ctx, func() { time.AfterFunc(g.cfg.ShutdownGrace, cancel) })
+	defer stop()
+	return h.HandleBatch(batchCtx, batch)
 }
 
 // Close sai do grupo e fecha o cliente.
@@ -195,6 +217,10 @@ func (g *GroupConsumer) onRevoked(ctx context.Context, _ *kgo.Client, revoked ma
 	if h == nil {
 		return
 	}
+	if g.isPoisoned() {
+		h.Drop(toTopicPartitions(revoked))
+		return
+	}
 	if err := h.Revoke(ctx, toTopicPartitions(revoked)); err != nil {
 		g.logger.Error("commit no revoke falhou; o próximo dono reprocessa a partir do último commit", "error", err)
 	}
@@ -221,6 +247,18 @@ func (g *GroupConsumer) fail(err error) {
 	if g.cancel != nil {
 		g.cancel()
 	}
+}
+
+func (g *GroupConsumer) poison() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.poisoned = true
+}
+
+func (g *GroupConsumer) isPoisoned() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.poisoned
 }
 
 func (g *GroupConsumer) fatalErr() error {
