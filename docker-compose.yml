@@ -156,7 +156,9 @@ services:
       CONNECT_VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
       CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
       KAFKA_HEAP_OPTS: "-Xms768m -Xmx768m"
-      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
+      # Só o conversor Avro e os conectores instalados: varrer /usr/share/java
+      # inteiro leva minutos na inicialização.
+      CONNECT_PLUGIN_PATH: /usr/share/java/kafka-serde-tools,/usr/share/confluent-hub-components
       # Segredos dos conectores vêm do ambiente, não do JSON versionado.
       CONNECT_CONFIG_PROVIDERS: env
       CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
@@ -169,6 +171,7 @@ services:
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-dev-only-change-me}
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8083/connectors >/dev/null"]
+      start_period: 60s
       interval: 10s
       timeout: 5s
       retries: 30
@@ -277,5 +280,5 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health >/dev/null"]
       interval: 10s
-      timeout: 5s
+      timeout: 15s
       retries: 20
