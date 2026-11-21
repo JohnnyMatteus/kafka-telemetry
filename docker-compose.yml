@@ -1,0 +1,276 @@
+# Ambiente local do pipeline de telemetria. Senhas e chaves são só de desenvolvimento.
+# Use o Makefile (make up, make ps, make logs, make down) ou, direto:
+#   docker compose --profile core --profile observability up -d --build
+# Profiles:
+#   core           Kafka (KRaft), Schema Registry, Connect, Postgres, MinIO, init, simulador e agregador
+#   observability  Prometheus e Jaeger
+#   tools          Kafka UI
+name: kafka-telemetry
+
+x-app-env: &app-env
+  KAFKA_BROKERS: kafka:29092
+  SCHEMA_REGISTRY_URL: http://schema-registry:8081
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_traceidratio}
+  OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.05}
+
+networks:
+  telemetry-net:
+    name: telemetry-net
+
+volumes:
+  kafka-data:
+  pgdata:
+  minio-data:
+  prometheus-data:
+
+services:
+  kafka:
+    profiles: ["core"]
+    image: confluentinc/cp-kafka:7.9.1
+    hostname: kafka
+    networks: [telemetry-net]
+    ports:
+      - "${KAFKA_PORT:-9092}:9092"
+    environment:
+      # KRaft: um nó que é broker e controller ao mesmo tempo, sem ZooKeeper.
+      CLUSTER_ID: "q1Sh-9_ISia_zwGINzRvyQ"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: INTERNAL://kafka:29092,CONTROLLER://kafka:29093,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:${KAFKA_PORT:-9092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: "-Xms512m -Xmx512m"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server kafka:29092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+    deploy:
+      resources:
+        limits: { memory: 1536m }
+
+  schema-registry:
+    profiles: ["core"]
+    image: confluentinc/cp-schema-registry:7.9.1
+    hostname: schema-registry
+    networks: [telemetry-net]
+    depends_on:
+      kafka: { condition: service_healthy }
+    ports:
+      - "${SCHEMA_REGISTRY_PORT:-8081}:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL: backward
+      SCHEMA_REGISTRY_HEAP_OPTS: "-Xms256m -Xmx256m"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/subjects >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    deploy:
+      resources:
+        limits: { memory: 512m }
+
+  postgres:
+    profiles: ["core"]
+    image: postgres:16-alpine
+    networks: [telemetry-net]
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_DB: telemetry
+      POSTGRES_USER: telemetry
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev-only-change-me}
+    volumes:
+      - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U telemetry -d telemetry"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Object storage compatível com S3: data lake da telemetria bruta (ver ADR 0007).
+  minio:
+    profiles: ["core"]
+    image: bitnamilegacy/minio:2024.12.18
+    networks: [telemetry-net]
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-dev-only-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-dev-only-change-me}
+      MINIO_DEFAULT_BUCKETS: ${S3_BUCKET:-agrovale-telemetry-raw}
+    volumes:
+      - minio-data:/bitnami/minio/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  connect:
+    profiles: ["core"]
+    build: ./connect
+    image: kafka-telemetry-connect:local
+    hostname: connect
+    networks: [telemetry-net]
+    depends_on:
+      kafka: { condition: service_healthy }
+      schema-registry: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    ports:
+      - "${CONNECT_PORT:-8083}:8083"
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: kafka:29092
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect
+      CONNECT_GROUP_ID: greenhouse-connect
+      CONNECT_CONFIG_STORAGE_TOPIC: _connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: _connect-offsets
+      CONNECT_STATUS_STORAGE_TOPIC: _connect-status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      KAFKA_HEAP_OPTS: "-Xms768m -Xmx768m"
+      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
+      # Segredos dos conectores vêm do ambiente, não do JSON versionado.
+      CONNECT_CONFIG_PROVIDERS: env
+      CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
+      JDBC_SINK_USER: telemetry
+      JDBC_SINK_PASSWORD: ${POSTGRES_PASSWORD:-dev-only-change-me}
+      S3_BUCKET: ${S3_BUCKET:-agrovale-telemetry-raw}
+      S3_ENDPOINT: http://minio:9000
+      # Cadeia padrão de credenciais da AWS: na nuvem, troque por IAM role.
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-dev-only-minio}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-dev-only-change-me}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/connectors >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    deploy:
+      resources:
+        limits: { memory: 2g }
+
+  # Cria tópicos e registra os schemas com compatibilidade BACKWARD.
+  init:
+    profiles: ["core"]
+    image: kafka-telemetry:local
+    build: .
+    command: ["telemetryctl", "init"]
+    networks: [telemetry-net]
+    environment: *app-env
+    depends_on:
+      kafka: { condition: service_healthy }
+      schema-registry: { condition: service_healthy }
+    restart: "no"
+
+  connectors:
+    profiles: ["core"]
+    image: curlimages/curl:8.11.1
+    entrypoint: ["sh", "/scripts/deploy-connectors.sh", "/connect"]
+    networks: [telemetry-net]
+    environment:
+      CONNECT_URL: http://connect:8083
+    volumes:
+      - ./scripts/deploy-connectors.sh:/scripts/deploy-connectors.sh:ro
+      - ./connect:/connect:ro
+    depends_on:
+      connect: { condition: service_healthy }
+      init: { condition: service_completed_successfully }
+    restart: "no"
+
+  simulator:
+    profiles: ["core"]
+    image: kafka-telemetry:local
+    command: ["simulator"]
+    networks: [telemetry-net]
+    environment:
+      <<: *app-env
+      SIM_GREENHOUSES: ${SIM_GREENHOUSES:-20}
+      SIM_RATE: ${SIM_RATE:-80}
+    ports:
+      - "${SIMULATOR_METRICS_PORT:-9101}:9101"
+    depends_on:
+      init: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+  aggregator:
+    profiles: ["core"]
+    image: kafka-telemetry:local
+    command: ["aggregator"]
+    networks: [telemetry-net]
+    environment: *app-env
+    ports:
+      - "${AGGREGATOR_METRICS_PORT:-9102}:9102"
+    depends_on:
+      init: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+  prometheus:
+    profiles: ["observability"]
+    image: prom/prometheus:v2.55.1
+    networks: [telemetry-net]
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./deploy/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  jaeger:
+    profiles: ["observability"]
+    image: jaegertracing/all-in-one:1.62.0
+    networks: [telemetry-net]
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"
+      - "${JAEGER_OTLP_PORT:-4318}:4318"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:14269/ >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  kafka-ui:
+    profiles: ["tools"]
+    image: provectuslabs/kafka-ui:v0.7.2
+    networks: [telemetry-net]
+    ports:
+      - "${KAFKA_UI_PORT:-8080}:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: agrovale-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: connect
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
+    depends_on:
+      kafka: { condition: service_healthy }
+      schema-registry: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 20

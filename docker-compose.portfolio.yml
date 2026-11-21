@@ -1,0 +1,14 @@
+# Override opcional: liga os serviços expostos à rede compartilhada do
+# ecossistema (criada por `make network`), para o copiloto de operações e a
+# plataforma de entrada enxergarem este projeto. Use com `make up-portfolio`.
+networks:
+  portfolio-net:
+    external: true
+
+services:
+  aggregator:
+    networks: [telemetry-net, portfolio-net]
+  simulator:
+    networks: [telemetry-net, portfolio-net]
+  prometheus:
+    networks: [telemetry-net, portfolio-net]
