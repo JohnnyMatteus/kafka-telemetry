@@ -374,12 +374,20 @@ func (r *Reprocessor) baseFor(ctx context.Context, ref WindowRef, caught *sinkCh
 	if b.Found {
 		return b, nil
 	}
-	ok, err := caught.get(ctx, bf.Sink)
+	ok, fresh, err := caught.get(ctx, bf.Sink)
 	if err != nil {
 		return Base{}, fmt.Errorf("prova do sink: %w", err)
 	}
 	if !ok {
 		return Base{}, ErrBaseUnknown
+	}
+	if fresh {
+		// A prova veio depois da leitura acima: o sink pode ter gravado a
+		// janela e commitado entre as duas. A ausência só vale numa leitura
+		// feita depois da prova, então lê de novo.
+		if b, err = bf.Reader.Window(ctx, ref.GreenhouseID, ref.SensorType, ref.Start); err != nil {
+			return Base{}, fmt.Errorf("reler o agregado emitido: %w", err)
+		}
 	}
 	return b, nil
 }
@@ -390,16 +398,18 @@ type sinkCheck struct {
 	ok   bool
 }
 
-func (c *sinkCheck) get(ctx context.Context, p SinkProof) (bool, error) {
+// get devolve a prova e se ela foi obtida agora (fresh) ou já vinha de antes,
+// de uma janela anterior da mesma execução.
+func (c *sinkCheck) get(ctx context.Context, p SinkProof) (ok, fresh bool, err error) {
 	if c.done {
-		return c.ok, nil
+		return c.ok, false, nil
 	}
-	ok, err := p.CaughtUp(ctx)
+	ok, err = p.CaughtUp(ctx)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	c.done, c.ok = true, ok
-	return ok, nil
+	return ok, true, nil
 }
 
 func (r *Reprocessor) previewWindow(ctx context.Context, cs []candidate, caught *sinkCheck) (WindowResult, error) {

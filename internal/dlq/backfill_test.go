@@ -383,3 +383,42 @@ func TestWindowKeyIsUnambiguousAndAPoisonedPendingMarkIsHarmless(t *testing.T) {
 		t.Fatalf("a marca ilegível devia ter saído da fila: %d", n)
 	}
 }
+
+// racingSink simula o sink atrasado que se recupera entre a primeira leitura
+// da janela e a prova: ao ser consultado, grava a linha e "commita".
+type racingSink struct {
+	rows *racingRows
+}
+
+func (s racingSink) CaughtUp(context.Context) (bool, error) {
+	s.rows.base = dlq.Base{Found: true, Count: 2, Sum: 44, Min: 20, Max: 24}
+	return true, nil
+}
+
+type racingRows struct{ base dlq.Base }
+
+func (r *racingRows) Window(context.Context, string, string, time.Time) (dlq.Base, error) {
+	return r.base, nil
+}
+
+func TestBackfillRereadsTheWindowAfterTheSinkProof(t *testing.T) {
+	entries := func(t *testing.T, reg registry) []dlq.Entry {
+		return []dlq.Entry{entryWith(0, "unknown_schema", readings, encodeReading(t, reg, "late-y", 50, t0.Add(30*time.Second)))}
+	}
+	f := newBackfillFixture(t, entries)
+	rows := &racingRows{}
+	f.deps.Backfill.Reader = rows
+	f.deps.Backfill.Sink = racingSink{rows: rows}
+	r, err := dlq.New(dlq.Config{Destination: readings, DLQTopic: deadQ, MaxBatch: 10, WindowSize: time.Minute}, f.deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := r.Run(context.Background(), dlq.Request{Operator: "ana", Backfill: true, Execute: true})
+	if err != nil || res.Replayed != 1 {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	aggs := aggregatesOf(t, f.reg, f.bf.sent)
+	if len(aggs) != 1 || aggs[0].SampleCount != 3 || aggs[0].MinValue != 20 || aggs[0].MaxValue != 50 {
+		t.Fatalf("a base gravada pelo sink no meio foi perdida: %+v", aggs)
+	}
+}
