@@ -351,6 +351,9 @@ services:
       # listener.name.<listener>.ssl.client.auth. A imagem converte "_" em "." e "__" em
       # "_" (confluent-docker-utils, env_to_props), então SASL__SSL vira sasl_ssl.
       KAFKA_LISTENER_NAME_SASL__SSL_SSL_CLIENT_AUTH: required
+      # A global não exige certificado em SASL_SSL, mas sem ela o configure da imagem
+      # (linha 107) não exporta o truststore e o broker cai com "PKIX path building failed".
+      KAFKA_SSL_CLIENT_AUTH: required
       KAFKA_LISTENER_NAME_CONTROLLER_SSL_CLIENT_AUTH: required
       KAFKA_SSL_KEYSTORE_FILENAME: kafka-secure.keystore.p12
       KAFKA_SSL_KEYSTORE_CREDENTIALS: keystore_creds

@@ -190,7 +190,8 @@ func TestSecureBrokerRequiresClientCertsPerListener(t *testing.T) {
 			t.Errorf("docker-compose.yml sem %q: o mTLS não valeria no listener", want)
 		}
 	}
-	if regexp.MustCompile(`(?m)^\s*KAFKA_SSL_CLIENT_AUTH:`).MatchString(text) {
-		t.Error("KAFKA_SSL_CLIENT_AUTH global é ignorado em SASL_SSL: use a chave com prefixo de listener")
+	// A global não basta para o mTLS, mas o configure da imagem só exporta o truststore com ela.
+	if !regexp.MustCompile(`(?m)^\s*KAFKA_SSL_CLIENT_AUTH: required$`).MatchString(text) {
+		t.Error("sem KAFKA_SSL_CLIENT_AUTH: required a imagem cp-kafka não exporta o truststore do broker")
 	}
 }
