@@ -332,12 +332,16 @@ services:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-secure:29093
-      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,CONTROLLER://kafka-secure:29093
-      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-secure:29092
+      # O nome do listener é SASL_SSL de propósito: o script configure da imagem
+      # cp-kafka só lê KAFKA_SSL_*_FILENAME/_CREDENTIALS se KAFKA_ADVERTISED_LISTENERS
+      # contém "SSL://" (e só valida o JAAS com "SASL_...://"); com um nome
+      # como INTERNAL o broker subiria sem keystore.
+      KAFKA_LISTENERS: SASL_SSL://0.0.0.0:29092,CONTROLLER://kafka-secure:29093
+      KAFKA_ADVERTISED_LISTENERS: SASL_SSL://kafka-secure:29092
       # Os dois listeners exigem TLS, certificado de cliente (mTLS) e SASL.
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:SASL_SSL,CONTROLLER:SASL_SSL
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: SASL_SSL:SASL_SSL,CONTROLLER:SASL_SSL
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_INTER_BROKER_LISTENER_NAME: SASL_SSL
       KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
       KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: PLAIN
       KAFKA_SASL_MECHANISM_CONTROLLER_PROTOCOL: PLAIN
@@ -364,9 +368,9 @@ services:
       KAFKA_HEAP_OPTS: "-Xms512m -Xmx512m"
     volumes:
       - kafka-secure-data:/var/lib/kafka/data
-      - ./.secure:/etc/kafka/secrets:ro
+      - ./.secure/broker:/etc/kafka/secrets:ro
     healthcheck:
-      test: ["CMD-SHELL", "KAFKA_HEAP_OPTS=-Xmx64m kafka-broker-api-versions --bootstrap-server kafka-secure:29092 --command-config /etc/kafka/secrets/ops.properties >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "KAFKA_HEAP_OPTS=-Xmx64m kafka-broker-api-versions --bootstrap-server kafka-secure:29092 --command-config /etc/kafka/secrets/broker.properties >/dev/null 2>&1"]
       start_period: 30s
       interval: 10s
       timeout: 20s
@@ -408,9 +412,9 @@ services:
       SCHEMA_REGISTRY_AUTHENTICATION_ROLES: admin
       SCHEMA_REGISTRY_OPTS: -Djava.security.auth.login.config=/etc/schema-registry/secrets/registry_jaas.conf
     volumes:
-      - ./.secure:/etc/schema-registry/secrets:ro
+      - ./.secure/registry:/etc/schema-registry/secrets:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS --cacert /etc/schema-registry/secrets/ca.crt -u ops:$$(cat /etc/schema-registry/secrets/registry-ops.password) https://schema-registry-secure:8081/subjects >/dev/null"]
+      test: ["CMD-SHELL", "curl -fsS --cacert /etc/schema-registry/secrets/ca.crt -u healthcheck:$$(cat /etc/schema-registry/secrets/registry-healthcheck.password) https://schema-registry-secure:8081/subjects >/dev/null"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -428,7 +432,7 @@ services:
       KAFKA_HEAP_OPTS: "-Xmx128m"
     volumes:
       - ./deploy/secure:/deploy:ro
-      - ./.secure:/etc/kafka/secrets:ro
+      - ./.secure/ops:/etc/kafka/secrets:ro
     depends_on:
       kafka-secure: { condition: service_healthy }
     restart: "no"
@@ -448,7 +452,7 @@ services:
       SCHEMA_REGISTRY_USER: ops
       SCHEMA_REGISTRY_PASSWORD_FILE: /etc/secure/registry-ops.password
     volumes:
-      - ./.secure:/etc/secure:ro
+      - ./.secure/ops:/etc/secure:ro
     depends_on:
       acls-secure: { condition: service_completed_successfully }
       schema-registry-secure: { condition: service_healthy }
@@ -470,7 +474,7 @@ services:
       SIM_GREENHOUSES: ${SIM_GREENHOUSES:-20}
       SIM_RATE: ${SIM_RATE:-80}
     volumes:
-      - ./.secure:/etc/secure:ro
+      - ./.secure/simulator:/etc/secure:ro
     depends_on:
       init-secure: { condition: service_completed_successfully }
     restart: unless-stopped
@@ -493,7 +497,7 @@ services:
       OPERATOR_TOKENS: ${OPERATOR_TOKENS:-ana:dev-only-token-ana,bruno:dev-only-token-bruno}
       WINDOW_SIZE: ${WINDOW_SIZE:-1m}
     volumes:
-      - ./.secure:/etc/secure:ro
+      - ./.secure/aggregator:/etc/secure:ro
     ports:
       - "127.0.0.1:${AGGREGATOR_SECURE_PORT:-9112}:9102"
     depends_on:
@@ -520,7 +524,7 @@ services:
       NOTIFY_SMTP_ADDR: mailpit:1025
       NOTIFY_SMTP_FROM: alertas@example.com
     volumes:
-      - ./.secure:/etc/secure:ro
+      - ./.secure/notifier:/etc/secure:ro
       - ./deploy/notifier:/etc/notifier:ro
     depends_on:
       init-secure: { condition: service_completed_successfully }

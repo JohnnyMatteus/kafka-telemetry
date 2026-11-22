@@ -118,7 +118,7 @@ make secure-init   # gera CA, certificados, senhas e JAAS em .secure/ (fora do g
 make up-secure     # Kafka com SASL_SSL e mTLS, ACLs por serviço, registry HTTPS com login, simulador, agregador e notificador
 ```
 
-Decisão e limites no [ADR 0016](docs/adr/0016-perfil-seguro-tls-sasl-acls.md). **Este perfil nunca foi executado**: só foi validado com `docker compose config`, os testes do código cliente e o gerador de material. O Connect, o MinIO e a web ficam fora dele. O basic auth do registry autentica mas não separa leitura de escrita.
+Decisão e limites no [ADR 0016](docs/adr/0016-perfil-seguro-tls-sasl-acls.md). Cada serviço monta só o diretório do próprio principal (`.secure/<serviço>`), e nada gerado vai para o Git. O job `secure-profile` do CI sobe o perfil e prova o caminho simulador até agregador e as negações (ACLs, mTLS, senha SASL, registry sem senha); **nesta máquina só rodaram o gerador, os testes do cliente, o teste de higiene e `compose config`**, então o resultado do CI é a prova. O Connect, o MinIO e a web ficam fora dele. O basic auth do registry autentica mas não separa leitura de escrita.
 
 ## Como testar
 

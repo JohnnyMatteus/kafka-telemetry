@@ -75,3 +75,79 @@ func TestComposeHasNoLiteralSecrets(t *testing.T) {
 		t.Errorf("docker-compose.yml:%d: segredo literal: %s", i+1, strings.TrimSpace(line))
 	}
 }
+
+// Cada serviço do profile secure monta só o diretório do próprio principal
+// (nunca a raiz de .secure, o diretório da CA nem o de outro principal).
+func TestSecureServicesMountOnlyTheirOwnPrincipalDirectory(t *testing.T) {
+	root, _ := repoFiles(t)
+	b, err := os.ReadFile(filepath.Join(root, "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"kafka-secure": "broker", "schema-registry-secure": "registry", "acls-secure": "ops", "init-secure": "ops",
+		"simulator-secure": "simulator", "aggregator-secure": "aggregator", "notifier-secure": "notifier",
+	}
+	service := regexp.MustCompile(`^  ([a-z][a-z0-9-]*):\s*$`)
+	mount := regexp.MustCompile(`^\s*-\s*"?\.?/?\.secure(/[^:"\s]*)?:`)
+	var current string
+	seen := map[string][]string{}
+	for _, line := range strings.Split(string(b), "\n") {
+		if m := service.FindStringSubmatch(line); m != nil {
+			current = m[1]
+			continue
+		}
+		if m := mount.FindStringSubmatch(line); m != nil {
+			seen[current] = append(seen[current], strings.Trim(m[1], "/"))
+		}
+	}
+	for svc, dirs := range seen {
+		w, ok := want[svc]
+		if !ok {
+			t.Errorf("%s monta .secure mas não está na lista de serviços do profile", svc)
+			continue
+		}
+		if len(dirs) != 1 || dirs[0] != w {
+			t.Errorf("%s monta %v, só pode montar .secure/%s", svc, dirs, w)
+		}
+	}
+	for svc := range want {
+		if len(seen[svc]) == 0 {
+			t.Errorf("%s não monta o diretório do principal", svc)
+		}
+	}
+}
+
+// secure-init.sh só apaga um diretório que ele mesmo criou (marcador) e nunca
+// escreve num diretório alheio.
+func TestSecureInitRefusesToTouchADirectoryItDidNotCreate(t *testing.T) {
+	root, _ := repoFiles(t)
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("sem bash")
+	}
+	script := filepath.Join(root, "scripts", "secure-init.sh")
+	victim := t.TempDir()
+	sentinel := filepath.Join(victim, "precioso.txt")
+	if err := os.WriteFile(sentinel, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"--force"}, {}} {
+		cmd := exec.Command(bash, append([]string{script}, args...)...)
+		cmd.Env = append(os.Environ(), "SECURE_DIR="+victim)
+		if out, err := cmd.CombinedOutput(); err == nil {
+			t.Fatalf("args %v: o script aceitou um diretório que não criou: %s", args, out)
+		}
+		if _, err := os.Stat(sentinel); err != nil {
+			t.Fatalf("args %v: o script apagou o conteúdo do diretório alheio", args)
+		}
+	}
+	// Caminho relativo é recusado antes de qualquer remoção. (Raiz e diretório
+	// pessoal também são, mas um teste não deve nem chegar perto de apontar o
+	// script para eles.)
+	cmd := exec.Command(bash, script, "--force")
+	cmd.Env = append(os.Environ(), "SECURE_DIR=relativo")
+	if err := cmd.Run(); err == nil {
+		t.Error("SECURE_DIR relativo aceito")
+	}
+}

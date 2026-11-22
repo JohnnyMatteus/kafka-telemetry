@@ -102,3 +102,85 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  secure-profile:
+    name: Perfil seguro (mTLS, SASL, ACLs, registry autenticado)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COMPOSE: docker compose --env-file .secure/secure.env --profile secure
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gera o material do perfil (CA, certificados, senhas e JAAS)
+        run: |
+          ./scripts/secure-init.sh
+          # Nada do que foi gerado pode aparecer em log: mascara cada segredo.
+          for f in .secure/*/*.password .secure/*/*_creds; do
+            v="$(cat "$f")"; [ -n "$v" ] && echo "::add-mask::$v"
+          done
+          echo "::add-mask::$(cut -d= -f2- .secure/secure.env)"
+
+      - name: Cada principal só tem o material dele
+        run: |
+          test -z "$(find .secure -name ca.key -not -path '.secure/ca/*')"
+          for d in aggregator simulator notifier; do
+            for o in aggregator simulator notifier ops; do
+              [ "$d" = "$o" ] || test ! -e ".secure/$d/$o.password"
+            done
+            test ! -e ".secure/$d/ops.key"
+          done
+
+      - name: Sobe o perfil
+        run: $COMPOSE up -d --build
+
+      - name: Init (ACLs, tópicos e schemas) terminou com sucesso
+        run: |
+          for i in $(seq 1 72); do
+            id="$($COMPOSE ps -a -q init-secure)"
+            st="$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$id" 2>/dev/null || true)"
+            [ "$st" = "exited 0" ] && exit 0
+            case "$st" in "exited "[1-9]*) echo "init-secure falhou ($st)"; exit 1;; esac
+            sleep 5
+          done
+          echo "init-secure não terminou a tempo ($st)"; exit 1
+
+      - name: "(a) Do simulador ao agregador, pelo broker seguro e pelo registry autenticado"
+        run: |
+          for i in $(seq 1 60); do
+            m="$(curl -fsS http://127.0.0.1:9112/metrics 2>/dev/null || true)"
+            consumed="$(awk '/^telemetry_aggregator_records_consumed_total /{print int($2)}' <<<"$m")"
+            emitted="$(awk '/^telemetry_aggregator_aggregates_emitted_total /{print int($2)}' <<<"$m")"
+            echo "tentativa $i: consumidas=${consumed:-0} janelas=${emitted:-0}"
+            [ "${consumed:-0}" -gt 0 ] && [ "${emitted:-0}" -gt 0 ] && exit 0
+            sleep 5
+          done
+          echo "o agregador não consumiu e fechou janelas a tempo"; exit 1
+
+      - name: "(b) Simulador negado em greenhouse.alerts e nos checkpoints; (c) sem certificado e com senha errada negados"
+        run: |
+          docker run --rm --network telemetry-net \
+            -v "$PWD/.secure/simulator:/s:ro" -v "$PWD/deploy/secure:/d:ro" \
+            confluentinc/cp-kafka:7.9.1 bash /d/prove-acls.sh
+
+      - name: "(d) Registry sem senha negado e com a senha do serviço aceito"
+        run: |
+          docker run --rm --network telemetry-net -v "$PWD/.secure/simulator:/s:ro" curlimages/curl:8.11.1 sh -c '
+            sem="$(curl -s -o /dev/null -w "%{http_code}" --cacert /s/ca.crt https://schema-registry-secure:8081/subjects)"
+            errada="$(curl -s -o /dev/null -w "%{http_code}" --cacert /s/ca.crt -u simulator:senha-errada https://schema-registry-secure:8081/subjects)"
+            com="$(curl -s -o /dev/null -w "%{http_code}" --cacert /s/ca.crt -u "simulator:$(cat /s/registry-simulator.password)" https://schema-registry-secure:8081/subjects)"
+            echo "sem senha: $sem, senha errada: $errada, senha do serviço: $com"
+            [ "$sem" = 401 ] && [ "$errada" = 401 ] && [ "$com" = 200 ]'
+
+      - name: Logs dos serviços (só em falha, com segredos redigidos)
+        if: failure()
+        run: |
+          $COMPOSE ps -a || true
+          $COMPOSE logs --no-color --tail=60 2>&1 \
+            | sed -E 's/((password|secret|jaas|credentials)[A-Za-z0-9_.]*[=:] *).*/\1[redigido]/I' || true
+
+      - name: "(e) Derruba o perfil, com volumes, e apaga o material"
+        if: always()
+        run: |
+          $COMPOSE down -v --remove-orphans || true
+          rm -rf .secure
