@@ -389,6 +389,9 @@ services:
     networks: [telemetry-net]
     depends_on:
       kafka-secure: { condition: service_healthy }
+      # As ACLs do usuário schemaregistry (criar _schemas, ler o grupo) têm de existir
+      # antes de o registry subir.
+      acls-secure: { condition: service_completed_successfully }
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry-secure
       SCHEMA_REGISTRY_LISTENERS: https://0.0.0.0:8081
@@ -410,7 +413,17 @@ services:
       SCHEMA_REGISTRY_AUTHENTICATION_METHOD: BASIC
       SCHEMA_REGISTRY_AUTHENTICATION_REALM: SchemaRegistry
       SCHEMA_REGISTRY_AUTHENTICATION_ROLES: admin
+      # O JAAS precisa de DUAS variáveis: a imagem espera o Kafka com `cub kafka-ready
+      # --config admin.properties` (script ensure), e o cub só repassa KAFKA_OPTS à
+      # JVM; SCHEMA_REGISTRY_OPTS vale só para o processo do registry. O
+      # admin.properties vem de SCHEMA_REGISTRY_KAFKASTORE_* (inclui o keystore do mTLS).
+      KAFKA_OPTS: -Djava.security.auth.login.config=/etc/schema-registry/secrets/registry_jaas.conf
       SCHEMA_REGISTRY_OPTS: -Djava.security.auth.login.config=/etc/schema-registry/secrets/registry_jaas.conf
+      # Só há listener https: as chamadas entre instâncias também (e usam este truststore).
+      SCHEMA_REGISTRY_INTER_INSTANCE_PROTOCOL: https
+      SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION: /etc/schema-registry/secrets/truststore.p12
+      SCHEMA_REGISTRY_SSL_TRUSTSTORE_TYPE: PKCS12
+      SCHEMA_REGISTRY_SSL_TRUSTSTORE_PASSWORD: ${SECURE_STORE_PASSWORD:-}
     volumes:
       - ./.secure/registry:/etc/schema-registry/secrets:ro
     healthcheck:
