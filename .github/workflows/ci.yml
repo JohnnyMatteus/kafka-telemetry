@@ -175,16 +175,22 @@ jobs:
 
       - name: Nada foi gravado nos checkpoints pelo simulador negado
         run: |
-          # Como ops (superusuário): o tópico tem os checkpoints reais do agregador
+          # Como ops (superusuário): o tópico (1 partição) tem os checkpoints reais do agregador
           # e nenhum registro com a chave "k" que o simulador tentou escrever.
+          # O agregador grava sem parar, então --timeout-ms (tempo ocioso) sozinho nunca vence:
+          # a leitura tem prazo e precisa alcançar o fim que o tópico tinha ao começar o passo.
           docker run --rm --network telemetry-net -v "$PWD/.secure/ops:/etc/kafka/secrets:ro" \
             confluentinc/cp-kafka:7.9.1 bash -c '
-              out="$(kafka-console-consumer --bootstrap-server kafka-secure:29092 --consumer.config /etc/kafka/secrets/ops.properties \
-                --topic greenhouse.aggregator.checkpoints --partition 0 --offset earliest --timeout-ms 20000 \
-                --property print.key=true 2>/dev/null | cut -f1)"
-              echo "registros no tópico de checkpoints: $(grep -c . <<<"$out")"
-              [ -n "$out" ] || { echo "FALHA: o tópico está vazio, a prova seria vazia"; exit 1; }
-              grep -qx k <<<"$out" && { echo "FALHA: o simulador conseguiu escrever"; exit 1; }
+              B=kafka-secure:29092; C=/etc/kafka/secrets/ops.properties; T=greenhouse.aggregator.checkpoints
+              end="$(kafka-get-offsets --bootstrap-server $B --command-config $C --topic $T --time -1 | cut -d: -f3)"
+              case "$end" in ""|0|*[!0-9]*) echo "FALHA: sem offset final, a prova seria vazia"; exit 1;; esac
+              out="$(timeout 60 kafka-console-consumer --bootstrap-server $B --consumer.config $C \
+                --topic $T --partition 0 --offset earliest --timeout-ms 20000 \
+                --property print.offset=true --property print.key=true --property print.value=false 2>/dev/null || true)"
+              last="$(sed -n "s/^Offset:\([0-9][0-9]*\).*/\1/p" <<<"$out" | tail -n 1)"
+              echo "fim do tópico: $end; último offset lido: ${last:-nenhum}"
+              [ -n "$last" ] && [ "$last" -ge "$((end - 1))" ] || { echo "FALHA: a leitura não chegou ao fim"; exit 1; }
+              grep -qE "^Offset:[0-9]+[[:space:]]+k$" <<<"$out" && { echo "FALHA: o simulador conseguiu escrever"; exit 1; }
               echo "ok: nada foi gravado pelo simulador"'
 
       - name: "(d) Registry sem senha negado e com a senha do serviço aceito"
