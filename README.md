@@ -155,7 +155,7 @@ Resultado do teste de carga e métricas observadas: [docs/teste-de-carga.md](doc
 - Rodar `make loadtest` numa máquina dedicada e registrar as métricas em [docs/teste-de-carga.md](docs/teste-de-carga.md) (a rodada formal foi adiada para economizar recursos).
 - Watermark ocioso (por tempo de processamento) e watermark por estufa.
 - Reprocessador da DLQ e consumidor de alertas que notifica o produtor rural.
-- Autenticação da API e identificação de quem reconhece o alerta; extrair a API para um `cmd/api` se a carga de leitura crescer.
+- Extrair a API para um `cmd/api` se a carga de leitura crescer. A autenticação por token de operador e a autoria do reconhecimento de alertas já existem ([ADR 0011](docs/adr/0011-autenticacao-de-operador-na-api.md)).
 - SASL/mTLS, ACLs por serviço e registry autenticado.
 - Dashboards Grafana versionados e SLOs de lag e latência.
 - Teste de carga noturno no CI com limiar de regressão.
