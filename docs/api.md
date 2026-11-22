@@ -2,6 +2,8 @@
 
 JSON em `snake_case`, servida pelo agregador na porta de HTTP (`METRICS_ADDR`, padrão `:9102`; no compose, `AGGREGATOR_METRICS_PORT`). Decisão em [ADR 0010](adr/0010-api-de-consulta-no-agregador.md). Horários em RFC3339 UTC.
 
+Todas as rotas exigem `Authorization: Bearer <token>` de um operador (decisão em [ADR 0011](adr/0011-autenticacao-de-operador-na-api.md)). Sem token ou com token inválido, `401` com `WWW-Authenticate: Bearer`. Sem `OPERATOR_TOKENS` no agregador, nenhuma rota da API existe.
+
 Erros têm o formato `{"error": "mensagem"}`. `400` para parâmetro inválido, `404` para recurso inexistente, `409` para conflito e `503` quando a fonte de dados (Redis, Postgres ou Kafka) está indisponível. Rotas cuja fonte não está configurada não existem (`404`).
 
 | Rota | Fonte |
@@ -43,11 +45,11 @@ Alertas mais recentes primeiro. `status` é `open` (sem reconhecimento), `acknow
   "observed_value":36.1,"limit_value":32,"acknowledged_at":null,"note":null}]}
 ```
 
-`rule` é `ABOVE_MAX` ou `BELOW_MIN`. `acknowledged_at` e `note` são sempre presentes, `null` quando ausentes.
+`rule` é `ABOVE_MAX` ou `BELOW_MIN`. `acknowledged_at`, `acknowledged_by` e `note` são sempre presentes, `null` quando ausentes. `acknowledged_by` é o operador que reconheceu.
 
 ## POST /alerts/{id}/ack
 
-Corpo `{"note":"texto"}` (a nota é opcional, até 500 caracteres). Devolve o alerta atualizado, no formato acima. `404` se o alerta não existe e `409` se já foi reconhecido; a operação é atômica, então dois operadores simultâneos recebem um `200` e um `409`.
+Corpo `{"note":"texto"}` (a nota é opcional, até 500 caracteres). Devolve o alerta atualizado, no formato acima, com `acknowledged_by` igual ao operador do token. O corpo não aceita o nome do operador: ele vem só do token. `404` se o alerta não existe e `409` se já foi reconhecido; a operação é atômica, então dois operadores simultâneos recebem um `200` e um `409`.
 
 ## GET /dlq?limit=
 
@@ -87,6 +89,7 @@ Formato livre, pensado para painel. Lag vem do broker (offset commitado contra o
 | Variável | Efeito |
 | --- | --- |
 | `REDIS_ADDR` | liga `/greenhouses` e `/greenhouses/{id}/state` |
-| `POSTGRES_DSN` | liga séries e alertas; cria as colunas de reconhecimento se faltarem |
+| `OPERATOR_TOKENS` | `operador:token,...`; tokens de 8 ou mais caracteres. Sem ela, a API não é registrada |
+| `POSTGRES_DSN` | liga séries e alertas; cria as colunas de reconhecimento (`acknowledged_at`, `acknowledged_by`, `note`) se faltarem |
 | `KAFKA_BROKERS` | DLQ e saúde do pipeline |
 | `THRESHOLD_*` | faixas agronômicas |
