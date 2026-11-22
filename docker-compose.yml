@@ -5,6 +5,8 @@
 #   core           Kafka (KRaft), Schema Registry, Connect, Postgres, MinIO, Redis, init, simulador e agregador
 #   observability  Prometheus e Jaeger
 #   tools          Kafka UI
+#   secure         Kafka com TLS+mTLS, SASL e ACLs por serviço e Schema Registry autenticado
+#                  (make secure-init e make up-secure; exclui Connect, MinIO, web e observabilidade)
 name: kafka-telemetry
 
 x-app-env: &app-env
@@ -14,12 +16,23 @@ x-app-env: &app-env
   OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_traceidratio}
   OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.05}
 
+# Cliente seguro: o certificado, a chave e as senhas ficam em .secure/ (make
+# secure-init), montado em /etc/secure; aqui só há caminhos, nunca segredo.
+x-secure-client-env: &secure-client-env
+  KAFKA_BROKERS: kafka-secure:29092
+  KAFKA_TLS_CA_FILE: /etc/secure/ca.crt
+  KAFKA_SASL_MECHANISM: PLAIN
+  SCHEMA_REGISTRY_URL: https://schema-registry-secure:8081
+  SCHEMA_REGISTRY_CA_FILE: /etc/secure/ca.crt
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+
 networks:
   telemetry-net:
     name: telemetry-net
 
 volumes:
   kafka-data:
+  kafka-secure-data:
   pgdata:
   minio-data:
   redis-data:
@@ -89,7 +102,7 @@ services:
         limits: { memory: 512m }
 
   postgres:
-    profiles: ["core"]
+    profiles: ["core", "secure"]
     image: postgres:16-alpine
     networks: [telemetry-net]
     ports:
@@ -132,7 +145,7 @@ services:
 
   # Projeção do último estado de cada estufa, gravada pelo agregador.
   redis:
-    profiles: ["core"]
+    profiles: ["core", "secure"]
     image: redis:7.4.6-alpine
     networks: [telemetry-net]
     command: ["redis-server", "--appendonly", "yes"]
@@ -271,7 +284,7 @@ services:
     restart: unless-stopped
 
   mailpit:
-    profiles: ["core"]
+    profiles: ["core", "secure"]
     image: axllent/mailpit:v1.21.8
     networks: [telemetry-net]
     # Só a UI é publicada, e só no loopback: o SMTP (1025) fica na rede do
@@ -303,6 +316,214 @@ services:
       - "127.0.0.1:${NOTIFIER_METRICS_PORT:-9103}:9103"
     depends_on:
       init: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      mailpit: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ---- profile secure (ADR 0016): nada aqui roda sem `make secure-init` ----
+  kafka-secure:
+    profiles: ["secure"]
+    image: confluentinc/cp-kafka:7.9.1
+    hostname: kafka-secure
+    networks: [telemetry-net]
+    # Sem portas publicadas: só a rede do compose alcança o broker.
+    environment:
+      CLUSTER_ID: "q1Sh-9_ISia_zwGINzRvyQ"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-secure:29093
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,CONTROLLER://kafka-secure:29093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-secure:29092
+      # Os dois listeners exigem TLS, certificado de cliente (mTLS) e SASL.
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:SASL_SSL,CONTROLLER:SASL_SSL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
+      KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: PLAIN
+      KAFKA_SASL_MECHANISM_CONTROLLER_PROTOCOL: PLAIN
+      KAFKA_SSL_CLIENT_AUTH: required
+      KAFKA_SSL_KEYSTORE_FILENAME: kafka-secure.keystore.p12
+      KAFKA_SSL_KEYSTORE_CREDENTIALS: keystore_creds
+      KAFKA_SSL_KEY_CREDENTIALS: key_creds
+      KAFKA_SSL_TRUSTSTORE_FILENAME: truststore.p12
+      KAFKA_SSL_TRUSTSTORE_CREDENTIALS: truststore_creds
+      KAFKA_SSL_KEYSTORE_TYPE: PKCS12
+      KAFKA_SSL_TRUSTSTORE_TYPE: PKCS12
+      KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: https
+      # ACLs: negado por padrão; broker e ops são superusuários.
+      KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "false"
+      KAFKA_SUPER_USERS: User:broker;User:ops
+      KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/secrets/kafka_server_jaas.conf
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: "-Xms512m -Xmx512m"
+    volumes:
+      - kafka-secure-data:/var/lib/kafka/data
+      - ./.secure:/etc/kafka/secrets:ro
+    healthcheck:
+      test: ["CMD-SHELL", "KAFKA_HEAP_OPTS=-Xmx64m kafka-broker-api-versions --bootstrap-server kafka-secure:29092 --command-config /etc/kafka/secrets/ops.properties >/dev/null 2>&1"]
+      start_period: 30s
+      interval: 10s
+      timeout: 20s
+      retries: 30
+    deploy:
+      resources:
+        limits: { memory: 1536m }
+
+  # Registry com HTTPS e login HTTP basic (um usuário por serviço). O basic
+  # autentica; não separa leitura de escrita (isso exige o plugin de segurança
+  # do Confluent). O registry fala com o Kafka com o usuário `schemaregistry`.
+  schema-registry-secure:
+    profiles: ["secure"]
+    image: confluentinc/cp-schema-registry:7.9.1
+    hostname: schema-registry-secure
+    networks: [telemetry-net]
+    depends_on:
+      kafka-secure: { condition: service_healthy }
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry-secure
+      SCHEMA_REGISTRY_LISTENERS: https://0.0.0.0:8081
+      SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL: backward
+      SCHEMA_REGISTRY_HEAP_OPTS: "-Xms256m -Xmx256m"
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka-secure:29092
+      SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL: SASL_SSL
+      SCHEMA_REGISTRY_KAFKASTORE_SASL_MECHANISM: PLAIN
+      SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_LOCATION: /etc/schema-registry/secrets/truststore.p12
+      SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_TYPE: PKCS12
+      SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_PASSWORD: ${SECURE_STORE_PASSWORD:-}
+      SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_LOCATION: /etc/schema-registry/secrets/schemaregistry.keystore.p12
+      SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_TYPE: PKCS12
+      SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_PASSWORD: ${SECURE_STORE_PASSWORD:-}
+      SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION: /etc/schema-registry/secrets/schema-registry-secure.keystore.p12
+      SCHEMA_REGISTRY_SSL_KEYSTORE_TYPE: PKCS12
+      SCHEMA_REGISTRY_SSL_KEYSTORE_PASSWORD: ${SECURE_STORE_PASSWORD:-}
+      SCHEMA_REGISTRY_SSL_KEY_PASSWORD: ${SECURE_STORE_PASSWORD:-}
+      SCHEMA_REGISTRY_AUTHENTICATION_METHOD: BASIC
+      SCHEMA_REGISTRY_AUTHENTICATION_REALM: SchemaRegistry
+      SCHEMA_REGISTRY_AUTHENTICATION_ROLES: admin
+      SCHEMA_REGISTRY_OPTS: -Djava.security.auth.login.config=/etc/schema-registry/secrets/registry_jaas.conf
+    volumes:
+      - ./.secure:/etc/schema-registry/secrets:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --cacert /etc/schema-registry/secrets/ca.crt -u ops:$$(cat /etc/schema-registry/secrets/registry-ops.password) https://schema-registry-secure:8081/subjects >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    deploy:
+      resources:
+        limits: { memory: 512m }
+
+  # Cria as ACLs e depois os tópicos, com o usuário `ops`.
+  acls-secure:
+    profiles: ["secure"]
+    image: confluentinc/cp-kafka:7.9.1
+    networks: [telemetry-net]
+    entrypoint: ["bash", "/deploy/acls.sh"]
+    environment:
+      KAFKA_HEAP_OPTS: "-Xmx128m"
+    volumes:
+      - ./deploy/secure:/deploy:ro
+      - ./.secure:/etc/kafka/secrets:ro
+    depends_on:
+      kafka-secure: { condition: service_healthy }
+    restart: "no"
+
+  init-secure:
+    profiles: ["secure"]
+    image: kafka-telemetry:local
+    build: .
+    command: ["telemetryctl", "init"]
+    networks: [telemetry-net]
+    environment:
+      <<: *secure-client-env
+      KAFKA_TLS_CERT_FILE: /etc/secure/ops.crt
+      KAFKA_TLS_KEY_FILE: /etc/secure/ops.key
+      KAFKA_SASL_USER: ops
+      KAFKA_SASL_PASSWORD_FILE: /etc/secure/ops.password
+      SCHEMA_REGISTRY_USER: ops
+      SCHEMA_REGISTRY_PASSWORD_FILE: /etc/secure/registry-ops.password
+    volumes:
+      - ./.secure:/etc/secure:ro
+    depends_on:
+      acls-secure: { condition: service_completed_successfully }
+      schema-registry-secure: { condition: service_healthy }
+    restart: "no"
+
+  simulator-secure:
+    profiles: ["secure"]
+    image: kafka-telemetry:local
+    command: ["simulator"]
+    networks: [telemetry-net]
+    environment:
+      <<: *secure-client-env
+      KAFKA_TLS_CERT_FILE: /etc/secure/simulator.crt
+      KAFKA_TLS_KEY_FILE: /etc/secure/simulator.key
+      KAFKA_SASL_USER: simulator
+      KAFKA_SASL_PASSWORD_FILE: /etc/secure/simulator.password
+      SCHEMA_REGISTRY_USER: simulator
+      SCHEMA_REGISTRY_PASSWORD_FILE: /etc/secure/registry-simulator.password
+      SIM_GREENHOUSES: ${SIM_GREENHOUSES:-20}
+      SIM_RATE: ${SIM_RATE:-80}
+    volumes:
+      - ./.secure:/etc/secure:ro
+    depends_on:
+      init-secure: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+  aggregator-secure:
+    profiles: ["secure"]
+    image: kafka-telemetry:local
+    command: ["aggregator"]
+    networks: [telemetry-net]
+    environment:
+      <<: *secure-client-env
+      KAFKA_TLS_CERT_FILE: /etc/secure/aggregator.crt
+      KAFKA_TLS_KEY_FILE: /etc/secure/aggregator.key
+      KAFKA_SASL_USER: aggregator
+      KAFKA_SASL_PASSWORD_FILE: /etc/secure/aggregator.password
+      SCHEMA_REGISTRY_USER: aggregator
+      SCHEMA_REGISTRY_PASSWORD_FILE: /etc/secure/registry-aggregator.password
+      REDIS_ADDR: redis:6379
+      POSTGRES_DSN: postgres://telemetry:${POSTGRES_PASSWORD:-dev-only-change-me}@postgres:5432/telemetry
+      OPERATOR_TOKENS: ${OPERATOR_TOKENS:-ana:dev-only-token-ana,bruno:dev-only-token-bruno}
+      WINDOW_SIZE: ${WINDOW_SIZE:-1m}
+    volumes:
+      - ./.secure:/etc/secure:ro
+    ports:
+      - "127.0.0.1:${AGGREGATOR_SECURE_PORT:-9112}:9102"
+    depends_on:
+      init-secure: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+
+  notifier-secure:
+    profiles: ["secure"]
+    image: kafka-telemetry:local
+    command: ["notifier"]
+    networks: [telemetry-net]
+    environment:
+      <<: *secure-client-env
+      KAFKA_TLS_CERT_FILE: /etc/secure/notifier.crt
+      KAFKA_TLS_KEY_FILE: /etc/secure/notifier.key
+      KAFKA_SASL_USER: notifier
+      KAFKA_SASL_PASSWORD_FILE: /etc/secure/notifier.password
+      SCHEMA_REGISTRY_USER: notifier
+      SCHEMA_REGISTRY_PASSWORD_FILE: /etc/secure/registry-notifier.password
+      REDIS_ADDR: redis:6379
+      NOTIFY_RECIPIENTS_FILE: /etc/notifier/recipients.json
+      NOTIFY_SMTP_ADDR: mailpit:1025
+      NOTIFY_SMTP_FROM: alertas@example.com
+    volumes:
+      - ./.secure:/etc/secure:ro
+      - ./deploy/notifier:/etc/notifier:ro
+    depends_on:
+      init-secure: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
       mailpit: { condition: service_healthy }
     restart: unless-stopped
