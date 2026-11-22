@@ -265,6 +265,22 @@ services:
       postgres: { condition: service_healthy }
     restart: unless-stopped
 
+  web:
+    profiles: ["core"]
+    build: ./web
+    image: kafka-telemetry-web:local
+    networks: [telemetry-net]
+    ports:
+      - "${WEB_PORT:-8088}:8080"
+    depends_on:
+      aggregator: { condition: service_started }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
   prometheus:
     profiles: ["observability"]
     image: prom/prometheus:v2.55.1
