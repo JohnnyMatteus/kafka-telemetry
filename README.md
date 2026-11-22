@@ -160,10 +160,10 @@ Resultado do teste de carga e métricas observadas: [docs/teste-de-carga.md](doc
 | [0011](docs/adr/0011-autenticacao-de-operador-na-api.md) | Autenticação de operador por token e autoria no reconhecimento |
 | [0012](docs/adr/0012-reprocessador-da-dlq.md) | Reprocessador da DLQ: destino fixo, dry-run, ledger e autoria |
 | [0013](docs/adr/0013-notificador-de-alertas.md) | Notificador de alertas: e-mail e webhook assinado, idempotência e retry |
-| [0017](docs/adr/0017-helm-e-autoscaling-pelo-lag.md) | Helm e autoscaling do agregador pelo lag (KEDA); teste de carga noturno com limiar de regressão |
-| [0016](docs/adr/0016-perfil-seguro-tls-sasl-acls.md) | Perfil seguro: TLS, mTLS, SASL, ACLs por serviço e registry autenticado |
-| [0015](docs/adr/0015-backfill-de-janelas-fechadas.md) | Backfill de janelas fechadas: recalcula o agregado, idempotente por `event_id` |
 | [0014](docs/adr/0014-watermark-por-estufa-e-ocioso.md) | Watermark por estufa e fechamento ocioso por tempo de processamento |
+| [0015](docs/adr/0015-backfill-de-janelas-fechadas.md) | Backfill de janelas fechadas: recalcula o agregado, idempotente por `event_id` |
+| [0016](docs/adr/0016-perfil-seguro-tls-sasl-acls.md) | Perfil seguro: TLS, mTLS, SASL, ACLs por serviço e registry autenticado |
+| [0017](docs/adr/0017-helm-e-autoscaling-pelo-lag.md) | Helm e autoscaling do agregador pelo lag (KEDA); teste de carga noturno com limiar de regressão |
 
 ## Trade-offs
 
@@ -180,7 +180,6 @@ Resultado do teste de carga e métricas observadas: [docs/teste-de-carga.md](doc
 - Cadastro de produtores fora de arquivo ([ADR 0013](docs/adr/0013-notificador-de-alertas.md)).
 - Extrair a API para um `cmd/api` se a carga de leitura crescer. A autenticação por token de operador e a autoria do reconhecimento de alertas já existem ([ADR 0011](docs/adr/0011-autenticacao-de-operador-na-api.md)).
 - Executar o perfil seguro contra um broker real, incluir o Connect nele e separar leitura de escrita no registry ([ADR 0016](docs/adr/0016-perfil-seguro-tls-sasl-acls.md)).
-- Dashboards Grafana versionados e SLOs de lag e latência.
 - Exercitar o chart Helm e o autoscaling pelo lag (KEDA) em um cluster, e calibrar o teste de carga noturno com execuções reais ([ADR 0017](docs/adr/0017-helm-e-autoscaling-pelo-lag.md)).
 
 ## Estrutura
@@ -209,7 +208,7 @@ e2e/evidencia/  evidência em vídeo com Playwright
 
 ## Cursos exercitados
 
-Apache Kafka (tempo real, Kafka Connect, Schema Registry), Testes avançados (carga, integridade de dados), DDD e arquitetura baseada em eventos, Tech Metrics (métricas DORA e SLIs em [docs/observabilidade.md](docs/observabilidade.md)).
+Apache Kafka (tempo real, Kafka Connect, Schema Registry), Testes avançados (carga, integridade de dados), DDD e arquitetura baseada em eventos, Tech Metrics (SLIs e SLOs do pipeline em [docs/observabilidade.md](docs/observabilidade.md); as metas DORA lá descritas não têm automação).
 
 ## Licença
 

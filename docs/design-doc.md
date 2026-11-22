@@ -1,8 +1,8 @@
 # Design doc: pipeline de telemetria das estufas
 
 - Autor: Johnny Santos
-- Status: fundação implementada
-- Última revisão: 2026-11-21
+- Status: fundação e ondas 1 e 2 implementadas (o que foi exercitado e o que só o CI valida está nos ADRs)
+- Última revisão: 2026-11-22
 
 ## 1. Contexto
 
@@ -22,11 +22,12 @@ A cooperativa quer três coisas: ver a situação de cada estufa minuto a minuto
 
 ## 3. Não objetivos (nesta fundação)
 
-- Painel visual para o produtor rural (os dados ficam prontos no Postgres).
-- Notificação ativa do alerta (SMS, push); o alerta é publicado num tópico.
 - Comando de atuadores (abrir janela, ligar irrigação).
-- Autenticação dos gateways e TLS/SASL no Kafka (ver Segurança).
+- Autenticação dos gateways de campo (os clientes do cluster se autenticam no perfil seguro, ADR 0016; os dispositivos, não).
 - Multi-região e alta disponibilidade do ambiente local.
+- Notificação por SMS ou push: o notificador cobre e-mail e webhook assinado (ADR 0013).
+
+Estavam aqui na fundação e hoje existem: o painel do produtor (`web/`, front Canteiro), a notificação ativa, a API de consulta e o perfil seguro do Kafka.
 
 ## 4. Arquitetura
 
@@ -74,7 +75,13 @@ flowchart LR
 | Caso de uso de agregação | Orquestra decodificação, janelas, DLQ, publicação, checkpoint e commit por portas | `internal/aggregation` |
 | Adaptadores Kafka | Produtor, consumidor em grupo, checkpoint store, admin de tópicos, cliente do registry (franz-go) | `internal/kafka` |
 | Observabilidade | Métricas Prometheus, logs JSON, tracing OpenTelemetry | `internal/observability` |
-| telemetryctl | Cria tópicos, confere e registra schemas | `cmd/telemetryctl` |
+| telemetryctl | Cria tópicos, confere e registra schemas, e reprocessa a DLQ (`dlq replay`) | `cmd/telemetryctl` |
+| API de consulta | Estado das estufas, séries, alertas com reconhecimento por operador, DLQ, saúde do pipeline e reprocessamento da DLQ; autenticada por token de operador, no processo do agregador ([ADR 0010](adr/0010-api-de-consulta-no-agregador.md), [0011](adr/0011-autenticacao-de-operador-na-api.md)) | `internal/api`, `internal/postgres`, `internal/state` |
+| Último estado | Projeção por estufa no Redis, fora da garantia de entrega ([ADR 0009](adr/0009-ultimo-estado-no-redis.md)) | `internal/state` |
+| Reprocessador da DLQ | Republicação e backfill de janelas fechadas, com dry-run, ledger e autoria ([ADR 0012](adr/0012-reprocessador-da-dlq.md), [0015](adr/0015-backfill-de-janelas-fechadas.md)) | `internal/dlq` |
+| Notificador | Avisa o produtor rural por e-mail e webhook assinado, com idempotência e retry durável ([ADR 0013](adr/0013-notificador-de-alertas.md)) | `cmd/notifier`, `internal/notify` |
+| Front-end Canteiro | Painel do produtor e do operador (grade de estufas, séries, alertas, pipeline) | `web/` |
+| Implantação | Compose (perfis `core`, `observability`, `tools`, `secure`), chart Helm com autoscaling pelo lag, Grafana e SLOs versionados | `docker-compose.yml`, `deploy/` |
 | Kafka Connect | Sinks JDBC (Postgres) e S3 (MinIO), configuração versionada | `connect/` |
 
 A arquitetura é hexagonal: `internal/telemetry` não importa nada de infraestrutura; `internal/aggregation` define as portas (`Publisher`, `CheckpointStore`, `Committer`, `Decoder`, `Encoder`, `Observer`) e é testado inteiro em memória; `internal/kafka` implementa as portas.
@@ -200,7 +207,8 @@ O JDBC sink consome agregados e alertas e faz upsert no Postgres. O S3 sink cons
 - Nenhum segredo real no repositório: senhas de desenvolvimento marcadas como `dev-only-change-me`, `.env` ignorado, `.env.example` versionado.
 - Conectores não carregam senha no JSON: usam `EnvVarConfigProvider` (`${env:...}`); na nuvem, o provider aponta para um cofre (AWS Secrets Manager, Vault) e o S3 usa IAM role.
 - Imagem da aplicação `distroless:nonroot`, binários estáticos.
-- O ambiente local usa PLAINTEXT. Em produção: SASL/SCRAM ou mTLS nos listeners, ACLs por principal (simulador só escreve em `readings`; agregador lê `readings` e escreve nos demais), Schema Registry com autenticação e somente o pipeline de CI com permissão de registrar schemas.
+- O perfil padrão do compose usa PLAINTEXT. O perfil `secure` tem TLS com certificado de cliente (mTLS) e SASL/PLAIN nos listeners, ACLs por principal (simulador só escreve em `readings`; agregador lê `readings` e escreve nos demais; notificador só lê alertas) e Schema Registry com HTTPS e login basic ([ADR 0016](adr/0016-perfil-seguro-tls-sasl-acls.md)); a prova é o job `secure-profile` do CI. Fica para produção: SASL/SCRAM com credenciais de um cofre, autorização por operação no registry e permissão de registrar schemas só para o pipeline de CI.
+- A API de consulta exige token de operador em toda rota e grava quem reconheceu cada alerta ([ADR 0011](adr/0011-autenticacao-de-operador-na-api.md)); o webhook de alerta é assinado com um segredo por produtor.
 - Validação de entrada no domínio (faixa física, relógio, ids obrigatórios) protege os agregados de dados corrompidos.
 
 ## 9. Observabilidade

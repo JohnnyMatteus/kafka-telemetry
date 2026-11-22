@@ -100,9 +100,9 @@ Com `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318` e o profile `observability`
 
 ## Métricas de entrega (Tech Metrics)
 
-Além das métricas do sistema, o repositório acompanha as quatro métricas DORA a partir do histórico do GitHub, para medir o fluxo de entrega do próprio pipeline:
+O fluxo de entrega do repositório tem estas **metas**, acompanhadas à mão a partir do histórico do GitHub. **Não há automação que as meça**: nenhum script, painel ou job calcula frequência, lead time, falha ou restauração; as metas só valem se alguém olhar.
 
-| Métrica | Como medir aqui | Meta inicial |
+| Métrica | Como medir | Meta inicial |
 | --- | --- | --- |
 | Frequência de deploy | Merges na `main` com CI verde por semana | ≥ 2 |
 | Lead time de mudança | Do primeiro commit da branch ao merge | < 2 dias |
