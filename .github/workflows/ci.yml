@@ -234,10 +234,10 @@ jobs:
       - name: Renderiza o padrão, sem Secrets e com o selector coerente
         run: |
           helm template rel "$CHART" > /tmp/default.yaml
-          ! grep -q '^kind: Secret' /tmp/default.yaml
+          if grep -q '^kind: Secret' /tmp/default.yaml; then echo "o chart criou um Secret"; exit 1; fi
           grep -q 'kind: Deployment' /tmp/default.yaml
           grep -q 'replicas: 2' /tmp/default.yaml
-          ! grep -q 'kind: ScaledObject' /tmp/default.yaml
+          if grep -q 'kind: ScaledObject' /tmp/default.yaml; then echo "ScaledObject com o autoscaling desligado"; exit 1; fi
       - name: Autoscaling pelo lag, limitado pelas partições
         run: |
           helm template rel "$CHART" --set autoscaling.enabled=true --set autoscaling.maxReplicas=20 \
@@ -247,7 +247,9 @@ jobs:
           grep -q 'lagThreshold: "3000"' /tmp/keda.yaml
           grep -q 'consumerGroup: "greenhouse-aggregator"' /tmp/keda.yaml
           # Com o ScaledObject, o Deployment não fixa réplicas (o KEDA manda).
-          ! awk '/kind: Deployment/,/containers:/' /tmp/keda.yaml | grep -q '^  replicas:'
+          if awk '/kind: Deployment/,/containers:/' /tmp/keda.yaml | grep -q '^  replicas:'; then
+            echo "o Deployment fixa replicas com o ScaledObject"; exit 1
+          fi
       - name: minReplicas acima das partições é recusado
         run: |
           if helm template rel "$CHART" --set autoscaling.enabled=true --set autoscaling.minReplicas=9 --set kafka.partitions=6 >/dev/null 2>&1; then
@@ -263,7 +265,7 @@ jobs:
             --set schemaRegistry.auth.secretName=registry-auth --set schemaRegistry.auth.user=aggregator > /tmp/secure.yaml
           grep -q 'KAFKA_SASL_PASSWORD_FILE' /tmp/secure.yaml
           grep -q 'secretName: kafka-tls' /tmp/secure.yaml
-          ! grep -q '^kind: Secret' /tmp/secure.yaml
+          if grep -q '^kind: Secret' /tmp/secure.yaml; then echo "o chart criou um Secret"; exit 1; fi
       - name: Notificador, ServiceMonitor e simulador
         run: |
           helm template rel "$CHART" --set notifier.enabled=true --set serviceMonitor.enabled=true --set simulator.enabled=true > /tmp/all.yaml
@@ -271,3 +273,13 @@ jobs:
           grep -q 'name: rel-notifier' /tmp/all.yaml
           grep -q 'name: rel-simulator' /tmp/all.yaml
           grep -q 'recipients.json' /tmp/all.yaml
+          # A imagem declara USER nonroot:nonroot (por nome); com runAsNonRoot o kubelet
+          # exige UID numérico, então todo pod precisa de runAsUser/runAsGroup 65532.
+          pods="$(grep -c '^kind: Deployment' /tmp/all.yaml)"
+          uids="$(grep -c 'runAsUser: 65532' /tmp/all.yaml)"
+          gids="$(grep -c 'runAsGroup: 65532' /tmp/all.yaml)"
+          nonroot="$(grep -c 'runAsNonRoot: true' /tmp/all.yaml)"
+          echo "deployments=$pods runAsUser=$uids runAsGroup=$gids runAsNonRoot=$nonroot"
+          if [ "$pods" -lt 3 ] || [ "$uids" != "$pods" ] || [ "$gids" != "$pods" ] || [ "$nonroot" != "$pods" ]; then
+            echo "todo Deployment precisa de runAsNonRoot com runAsUser e runAsGroup numéricos"; exit 1
+          fi

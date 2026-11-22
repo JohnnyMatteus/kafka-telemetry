@@ -111,8 +111,13 @@ serviceAccount:
   create: true
   name: ""
 
+# A imagem declara USER nonroot:nonroot (por nome). Com runAsNonRoot o kubelet só
+# aceita usuário numérico ("cannot verify user is non-root"), então o UID e o GID
+# 65532 (nonroot da imagem distroless) são fixados aqui.
 podSecurityContext:
   runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
   seccompProfile: { type: RuntimeDefault }
 securityContext:
   allowPrivilegeEscalation: false
