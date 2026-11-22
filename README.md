@@ -120,6 +120,10 @@ make up-secure     # Kafka com SASL_SSL e mTLS, ACLs por serviço, registry HTTP
 
 Decisão e limites no [ADR 0016](docs/adr/0016-perfil-seguro-tls-sasl-acls.md). Cada serviço monta só o diretório do próprio principal (`.secure/<serviço>`), e nada gerado vai para o Git. O job `secure-profile` do CI sobe o perfil e prova o caminho simulador até agregador e as negações (ACLs, mTLS, senha SASL, registry sem senha); **nesta máquina só rodaram o gerador, os testes do cliente, o teste de higiene e `compose config`**, então o resultado do CI é a prova. O Connect, o MinIO e a web ficam fora dele. O basic auth do registry autentica mas não separa leitura de escrita.
 
+## Kubernetes (Helm)
+
+`deploy/helm/kafka-telemetry`: agregador com autoscaling pelo lag do consumo (KEDA, teto no número de partições), notificador e simulador opcionais; o chart não cria Secrets. **Só será renderizado e conferido pelo CI** (`helm lint` e `helm template`); nenhum cluster foi usado, então o escalonamento não foi exercitado. Detalhes e limites no [ADR 0017](docs/adr/0017-helm-e-autoscaling-pelo-lag.md).
+
 ## Como testar
 
 ```bash
@@ -156,6 +160,7 @@ Resultado do teste de carga e métricas observadas: [docs/teste-de-carga.md](doc
 | [0011](docs/adr/0011-autenticacao-de-operador-na-api.md) | Autenticação de operador por token e autoria no reconhecimento |
 | [0012](docs/adr/0012-reprocessador-da-dlq.md) | Reprocessador da DLQ: destino fixo, dry-run, ledger e autoria |
 | [0013](docs/adr/0013-notificador-de-alertas.md) | Notificador de alertas: e-mail e webhook assinado, idempotência e retry |
+| [0017](docs/adr/0017-helm-e-autoscaling-pelo-lag.md) | Helm e autoscaling do agregador pelo lag (KEDA); teste de carga noturno com limiar de regressão |
 | [0016](docs/adr/0016-perfil-seguro-tls-sasl-acls.md) | Perfil seguro: TLS, mTLS, SASL, ACLs por serviço e registry autenticado |
 | [0015](docs/adr/0015-backfill-de-janelas-fechadas.md) | Backfill de janelas fechadas: recalcula o agregado, idempotente por `event_id` |
 | [0014](docs/adr/0014-watermark-por-estufa-e-ocioso.md) | Watermark por estufa e fechamento ocioso por tempo de processamento |
@@ -176,8 +181,7 @@ Resultado do teste de carga e métricas observadas: [docs/teste-de-carga.md](doc
 - Extrair a API para um `cmd/api` se a carga de leitura crescer. A autenticação por token de operador e a autoria do reconhecimento de alertas já existem ([ADR 0011](docs/adr/0011-autenticacao-de-operador-na-api.md)).
 - Executar o perfil seguro contra um broker real, incluir o Connect nele e separar leitura de escrita no registry ([ADR 0016](docs/adr/0016-perfil-seguro-tls-sasl-acls.md)).
 - Dashboards Grafana versionados e SLOs de lag e latência.
-- Teste de carga noturno no CI com limiar de regressão.
-- Deploy em Kubernetes com autoscaling pelo lag.
+- Exercitar o chart Helm e o autoscaling pelo lag (KEDA) em um cluster, e calibrar o teste de carga noturno com execuções reais ([ADR 0017](docs/adr/0017-helm-e-autoscaling-pelo-lag.md)).
 
 ## Estrutura
 

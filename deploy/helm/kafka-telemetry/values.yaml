@@ -1,0 +1,120 @@
+# Valores padrão. Nenhum segredo mora aqui: senhas, tokens e certificados vêm de
+# Secrets que já existem no cluster (nomes abaixo), criados fora do chart.
+
+image:
+  # Sem registro padrão: aponte para a imagem construída do Dockerfile da raiz.
+  repository: kafka-telemetry
+  tag: ""            # vazio usa .Chart.AppVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+kafka:
+  brokers: "kafka:9092"
+  # O tópico de leituras tem este número de partições (telemetryctl topics -partitions).
+  # É o teto de instâncias úteis do agregador: o autoscaling nunca passa dele.
+  partitions: 6
+  consumerGroup: greenhouse-aggregator
+  readingsTopic: greenhouse.readings
+  # TLS, mTLS e SASL (ADR 0016). Com enabled=true, o Secret secretName precisa ter
+  # ca.crt, tls.crt, tls.key e a senha SASL na chave saslPasswordKey.
+  security:
+    enabled: false
+    secretName: ""
+    mechanism: PLAIN
+    user: ""
+    saslPasswordKey: sasl-password
+
+schemaRegistry:
+  url: "http://schema-registry:8081"
+  # HTTP basic: o Secret precisa ter ca.crt (se https) e a senha na chave passwordKey.
+  auth:
+    enabled: false
+    secretName: ""
+    user: ""
+    passwordKey: registry-password
+
+# Secret existente com POSTGRES_DSN (opcional) e OPERATOR_TOKENS (operador:token,...).
+# Sem OPERATOR_TOKENS a API de consulta fica desligada, não aberta.
+secrets:
+  aggregator: ""
+redis:
+  addr: "redis:6379"
+
+aggregator:
+  # Usado quando autoscaling.enabled=false.
+  replicas: 2
+  resources:
+    requests: { cpu: 250m, memory: 256Mi }
+    limits: { memory: 512Mi }
+  window:
+    size: 1m
+    allowedLateness: 10s
+    watermarkScope: greenhouse
+    watermarkIdleTimeout: 2m
+  extraEnv: []
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Autoscaling do agregador pelo LAG do consumo, com KEDA (o chart só cria o
+# ScaledObject; o KEDA precisa estar instalado no cluster). O número de réplicas
+# tende a lag_total / lagThreshold e nunca passa do número de partições.
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  # Registros em atraso que cada réplica deve absorver antes de escalar.
+  lagThreshold: 5000
+  pollingInterval: 15
+  cooldownPeriod: 300
+  # Descer devagar: cada mudança de réplicas é um rebalance do grupo.
+  scaleDownStabilizationSeconds: 300
+  # TriggerAuthentication do KEDA para o broker, se ele exigir SASL/TLS.
+  authenticationRef: ""
+
+pdb:
+  enabled: true
+  maxUnavailable: 1
+
+serviceMonitor:
+  # Exige o CRD do Prometheus Operator.
+  enabled: false
+  interval: 15s
+  labels: {}
+
+notifier:
+  enabled: false
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 128Mi }
+  group: greenhouse-notifier
+  smtp:
+    addr: ""         # vazio desliga o e-mail
+    from: alertas@example.com
+  # Secret existente com NOTIFY_SMTP_PASSWORD (se o SMTP autentica) e as variáveis
+  # dos segredos de webhook citadas em recipients (webhook_secret_env).
+  secretName: ""
+  # Conteúdo de recipients.json (ver deploy/notifier/recipients.json).
+  recipients:
+    producers: []
+  retry:
+    maxAge: 24h
+
+simulator:
+  # Só para ambientes de teste; o simulador gera carga sintética.
+  enabled: false
+  greenhouses: 20
+  rate: 80
+
+serviceAccount:
+  create: true
+  name: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile: { type: RuntimeDefault }
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: { drop: ["ALL"] }

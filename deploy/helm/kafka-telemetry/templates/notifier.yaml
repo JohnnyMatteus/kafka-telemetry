@@ -1,0 +1,98 @@
+{{- if .Values.notifier.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kt.fullname" . }}-notifier-recipients
+  labels:
+    {{- include "kt.labels" . | nindent 4 }}
+data:
+  recipients.json: |
+    {{- .Values.notifier.recipients | toPrettyJson | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kt.fullname" . }}-notifier
+  labels:
+    {{- include "kt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: notifier
+spec:
+  # Uma réplica por grupo: o notificador é idempotente (Redis), mas duas réplicas
+  # só dividiriam as partições dos alertas sem ganho a esta escala.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "kt.selector" . | nindent 6 }}
+      app.kubernetes.io/component: notifier
+  template:
+    metadata:
+      labels:
+        {{- include "kt.selector" . | nindent 8 }}
+        app.kubernetes.io/component: notifier
+      annotations:
+        checksum/recipients: {{ .Values.notifier.recipients | toJson | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "kt.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: notifier
+          image: {{ include "kt.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["notifier"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 9103
+          env:
+            {{- include "kt.kafkaEnv" . | nindent 12 }}
+            - name: NOTIFIER_GROUP
+              value: {{ .Values.notifier.group | quote }}
+            - name: METRICS_ADDR
+              value: ":9103"
+            - name: REDIS_ADDR
+              value: {{ .Values.redis.addr | quote }}
+            - name: NOTIFY_RECIPIENTS_FILE
+              value: /etc/notifier/recipients.json
+            - name: NOTIFY_RETRY_MAX_AGE
+              value: {{ .Values.notifier.retry.maxAge | quote }}
+            {{- if .Values.notifier.smtp.addr }}
+            - name: NOTIFY_SMTP_ADDR
+              value: {{ .Values.notifier.smtp.addr | quote }}
+            - name: NOTIFY_SMTP_FROM
+              value: {{ .Values.notifier.smtp.from | quote }}
+            {{- end }}
+          {{- if .Values.notifier.secretName }}
+          envFrom:
+            # Segredos de webhook (webhook_secret_env) e NOTIFY_SMTP_PASSWORD.
+            - secretRef:
+                name: {{ .Values.notifier.secretName }}
+          {{- end }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.notifier.resources | nindent 12 }}
+          volumeMounts:
+            - name: recipients
+              mountPath: /etc/notifier
+              readOnly: true
+            {{- include "kt.secureVolumeMounts" . | nindent 12 }}
+      volumes:
+        - name: recipients
+          configMap:
+            name: {{ include "kt.fullname" . }}-notifier-recipients
+        {{- include "kt.secureVolumes" . | nindent 8 }}
+{{- end }}

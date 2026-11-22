@@ -227,12 +227,12 @@ Detalhes em [observabilidade.md](observabilidade.md).
 
 ## 11. Plano de evolução
 
-0. **Pendências da fundação**: rodada formal do teste de carga.
+0. **Pendências da fundação**: rodada formal do teste de carga (o job noturno existe, mas nunca rodou).
 1. ~~Watermark ocioso~~ e ~~watermark por estufa~~: feitos ([ADR 0014](adr/0014-watermark-por-estufa-e-ocioso.md)).
-3. **Reprocessador da DLQ**: ferramenta que corrige e republica mensagens da DLQ.
-4. **Notificação de alertas** (consumidor de `greenhouse.alerts` com deduplicação por `alert_id`).
-5. **Segurança do cluster**: SASL/mTLS, ACLs, registry autenticado.
-6. **Dashboards Grafana** versionados e SLOs (lag < 30 s em p99, DLQ < 1%).
+3. ~~Reprocessador da DLQ~~ e backfill de janelas fechadas: feitos ([ADR 0012](adr/0012-reprocessador-da-dlq.md), [ADR 0015](adr/0015-backfill-de-janelas-fechadas.md)).
+4. ~~Notificação de alertas~~: feita ([ADR 0013](adr/0013-notificador-de-alertas.md)).
+5. **Segurança do cluster**: TLS, mTLS, SASL, ACLs e registry autenticado existem como perfil do compose ([ADR 0016](adr/0016-perfil-seguro-tls-sasl-acls.md)); a prova depende do job `secure-profile` do CI, e o Connect ainda não está no perfil.
+6. ~~Dashboards Grafana versionados e SLOs~~ de lag, latência e DLQ: feitos (`docs/observabilidade.md`).
 7. **EOS transacional** para o trecho Kafka → Kafka se surgir consumidor que não tolere duplicatas.
-8. **Teste de carga no CI noturno** com limiar de regressão de throughput.
-9. **Deploy em Kubernetes** com HPA pelo lag (KEDA) e PodDisruptionBudget.
+8. **Teste de carga no CI noturno** com limiar de regressão: implementado (`nightly-load.yml`), nunca executado; limiares são hipóteses ([ADR 0017](adr/0017-helm-e-autoscaling-pelo-lag.md)).
+9. **Deploy em Kubernetes** com autoscaling pelo lag (KEDA) e PodDisruptionBudget: chart em `deploy/helm/kafka-telemetry`, só renderizado pelo CI, sem cluster ([ADR 0017](adr/0017-helm-e-autoscaling-pelo-lag.md)).

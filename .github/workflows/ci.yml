@@ -218,3 +218,56 @@ jobs:
         run: |
           docker run --rm --entrypoint promtool -v "$PWD/deploy/prometheus:/etc/prometheus:ro" \
             prom/prometheus:v2.55.1 check config /etc/prometheus/prometheus.yml
+
+  helm:
+    name: Chart Helm (lint e renderização)
+    runs-on: ubuntu-latest
+    env:
+      CHART: deploy/helm/kafka-telemetry
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: helm lint
+        run: helm lint "$CHART" --strict
+      - name: Renderiza o padrão, sem Secrets e com o selector coerente
+        run: |
+          helm template rel "$CHART" > /tmp/default.yaml
+          ! grep -q '^kind: Secret' /tmp/default.yaml
+          grep -q 'kind: Deployment' /tmp/default.yaml
+          grep -q 'replicas: 2' /tmp/default.yaml
+          ! grep -q 'kind: ScaledObject' /tmp/default.yaml
+      - name: Autoscaling pelo lag, limitado pelas partições
+        run: |
+          helm template rel "$CHART" --set autoscaling.enabled=true --set autoscaling.maxReplicas=20 \
+            --set kafka.partitions=6 --set autoscaling.lagThreshold=3000 > /tmp/keda.yaml
+          grep -q 'kind: ScaledObject' /tmp/keda.yaml
+          grep -q 'maxReplicaCount: 6' /tmp/keda.yaml
+          grep -q 'lagThreshold: "3000"' /tmp/keda.yaml
+          grep -q 'consumerGroup: "greenhouse-aggregator"' /tmp/keda.yaml
+          # Com o ScaledObject, o Deployment não fixa réplicas (o KEDA manda).
+          ! awk '/kind: Deployment/,/containers:/' /tmp/keda.yaml | grep -q '^  replicas:'
+      - name: minReplicas acima das partições é recusado
+        run: |
+          if helm template rel "$CHART" --set autoscaling.enabled=true --set autoscaling.minReplicas=9 --set kafka.partitions=6 >/dev/null 2>&1; then
+            echo "o chart aceitou minReplicas maior que as partições"; exit 1
+          fi
+      - name: Segurança do Kafka exige o Secret e monta só o que ele traz
+        run: |
+          if helm template rel "$CHART" --set kafka.security.enabled=true >/dev/null 2>&1; then
+            echo "o chart aceitou kafka.security sem secretName"; exit 1
+          fi
+          helm template rel "$CHART" --set kafka.security.enabled=true --set kafka.security.secretName=kafka-tls \
+            --set kafka.security.user=aggregator --set schemaRegistry.auth.enabled=true \
+            --set schemaRegistry.auth.secretName=registry-auth --set schemaRegistry.auth.user=aggregator > /tmp/secure.yaml
+          grep -q 'KAFKA_SASL_PASSWORD_FILE' /tmp/secure.yaml
+          grep -q 'secretName: kafka-tls' /tmp/secure.yaml
+          ! grep -q '^kind: Secret' /tmp/secure.yaml
+      - name: Notificador, ServiceMonitor e simulador
+        run: |
+          helm template rel "$CHART" --set notifier.enabled=true --set serviceMonitor.enabled=true --set simulator.enabled=true > /tmp/all.yaml
+          grep -q 'kind: ServiceMonitor' /tmp/all.yaml
+          grep -q 'name: rel-notifier' /tmp/all.yaml
+          grep -q 'name: rel-simulator' /tmp/all.yaml
+          grep -q 'recipients.json' /tmp/all.yaml

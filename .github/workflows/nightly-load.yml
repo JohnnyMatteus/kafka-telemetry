@@ -1,0 +1,93 @@
+name: Carga noturna
+
+# Roda todo dia (e sob demanda) na branch padrão. Sobe só o necessário do
+# compose (Kafka, registry, Redis, Postgres e agregador), gera carga com o
+# próprio simulador, e reprova se algum piso absoluto for violado ou se a vazão,
+# a latência de ack, o lag máximo ou a drenagem regredirem frente à última
+# execução aprovada. Os limiares ficam em deploy/loadtest/thresholds.json.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      rate:
+        description: Leituras por segundo
+        default: "1000"
+      duration:
+        description: Duração da carga
+        default: 60s
+      greenhouses:
+        description: Estufas
+        default: "100"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-load
+  cancel-in-progress: false
+
+jobs:
+  load:
+    name: Teste de carga e limiar de regressão
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      LOAD_RATE: ${{ github.event.inputs.rate || '1000' }}
+      LOAD_DURATION: ${{ github.event.inputs.duration || '60s' }}
+      LOAD_GREENHOUSES: ${{ github.event.inputs.greenhouses || '100' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Última execução aprovada (base da regressão)
+        id: base
+        uses: actions/cache/restore@v4
+        with:
+          path: loadtest-base
+          key: loadtest-base-${{ github.run_id }}
+          restore-keys: loadtest-base-
+
+      - name: Sobe o ambiente mínimo
+        run: docker compose --profile core up -d --build aggregator
+
+      - name: Espera o agregador
+        run: |
+          for i in $(seq 1 90); do
+            curl -fsS http://localhost:9102/healthz >/dev/null 2>&1 && exit 0
+            sleep 5
+          done
+          echo "o agregador não ficou saudável"; exit 1
+
+      - name: Carga
+        run: ./scripts/load-test.sh "$LOAD_RATE" "$LOAD_DURATION" "$LOAD_GREENHOUSES"
+
+      - name: Limiar de regressão
+        run: |
+          test -s loadtest-results/latest.json || { echo "a carga não gerou latest.json"; exit 1; }
+          ./scripts/loadtest-check.sh loadtest-results/latest.json deploy/loadtest/thresholds.json loadtest-base/latest.json
+
+      - name: Guarda o resultado como base (só depois de aprovado)
+        run: mkdir -p loadtest-base && cp loadtest-results/latest.json loadtest-base/latest.json
+      - uses: actions/cache/save@v4
+        with:
+          path: loadtest-base
+          key: loadtest-base-${{ github.run_id }}
+
+      - name: Resultado
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loadtest-results
+          path: loadtest-results/
+          if-no-files-found: warn
+
+      - name: Logs do agregador (só em falha)
+        if: failure()
+        run: docker compose --profile core logs --no-color --tail=80 aggregator || true
+
+      - name: Derruba o ambiente
+        if: always()
+        run: docker compose --profile core down -v --remove-orphans || true

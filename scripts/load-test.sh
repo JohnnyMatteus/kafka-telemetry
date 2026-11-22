@@ -44,11 +44,12 @@ done
 wait "$SIM_PID"
 
 drain_start=$(date +%s)
+drained=true
 while :; do
   lag="$(metric_sum telemetry_aggregator_consumer_lag)"
   (( lag > max_lag )) && max_lag=$lag
   (( lag == 0 )) && break
-  (( $(date +%s) - drain_start > 300 )) && { echo "lag não zerou em 5 minutos"; break; }
+  (( $(date +%s) - drain_start > 300 )) && { echo "lag não zerou em 5 minutos"; drained=false; break; }
   sleep 1
 done
 drain_seconds=$(( $(date +%s) - drain_start ))
@@ -56,6 +57,39 @@ drain_seconds=$(( $(date +%s) - drain_start ))
 consumed=$(( $(metric_sum telemetry_aggregator_records_consumed_total) - consumed_before ))
 aggregates=$(( $(metric_sum telemetry_aggregator_aggregates_emitted_total) - aggregates_before ))
 summary="$(grep 'resumo da simulação' "$OUT_DIR/$STAMP-simulator.log" || true)"
+
+# Resultado em JSON para o limiar de regressão do CI (scripts/loadtest-check.sh).
+# Campo ausente vira null e o verificador reprova: nada é preenchido com zero.
+if command -v jq >/dev/null 2>&1; then
+  # Duração de Go ("850µs", "12.3ms", "1.2s", "1m2s") em milissegundos.
+  to_ms() {
+    awk -v d="$1" 'BEGIN {
+      if (d == "" || d == "n/a") { print "null"; exit }
+      ms = 0; s = d
+      while (match(s, /^[0-9.]+(h|ms|µs|us|ns|m|s)/)) {
+        tok = substr(s, 1, RLENGTH); s = substr(s, RLENGTH + 1)
+        match(tok, /[0-9.]+/); v = substr(tok, 1, RLENGTH) + 0; u = substr(tok, RLENGTH + 1)
+        if (u == "h") ms += v * 3600000; else if (u == "m") ms += v * 60000; else if (u == "s") ms += v * 1000
+        else if (u == "ms") ms += v; else if (u == "µs" || u == "us") ms += v / 1000; else if (u == "ns") ms += v / 1000000
+      }
+      if (s != "") { print "null"; exit }
+      printf "%.3f", ms }'
+  }
+  field() { printf '%s' "$summary" | jq -r --arg k "$1" '.[$k] // empty' 2>/dev/null || true; }
+  p99="$(to_ms "$(field ack_p99)")"
+  jq -n --argjson rate "$RATE" --arg duration "$DURATION" --argjson greenhouses "$GREENHOUSES" \
+    --arg acked "$(field acked)" --arg errors "$(field errors)" --arg tput "$(field throughput_per_s)" --argjson p99 "${p99:-null}" \
+    --argjson consumed "$consumed" --argjson aggregates "$aggregates" --argjson lag_max "$max_lag" \
+    --argjson drain "$drain_seconds" --argjson drained "$drained" '
+    def num($s): if $s == "" then null else ($s | tonumber) end;
+    {rate_requested: $rate, duration: $duration, greenhouses: $greenhouses,
+     acked: num($acked), errors: num($errors), throughput_per_s: num($tput), ack_p99_ms: $p99,
+     consumed: $consumed, aggregates_emitted: $aggregates, lag_max: $lag_max,
+     drain_seconds: $drain, drained: $drained}' > "$OUT_DIR/$STAMP.json"
+  cp "$OUT_DIR/$STAMP.json" "$OUT_DIR/latest.json"
+else
+  echo "jq não encontrado: resultado em JSON não gerado" >&2
+fi
 
 {
   echo "teste de carga $STAMP"
