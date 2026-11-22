@@ -34,21 +34,30 @@ type Deps struct {
 	Thresholds telemetry.Thresholds
 	Logger     *slog.Logger
 	Now        func() time.Time
+	// Auth exige token de operador em todas as rotas. Sem ele a API não é
+	// registrada (nem /thresholds): não existe modo aberto.
+	Auth *OperatorAuth
 }
 
-// Routes monta as rotas da API.
+// Routes monta as rotas da API, todas protegidas por d.Auth. Sem Auth, nenhuma
+// rota é registrada; /metrics e /healthz do agregador continuam abertos.
 func Routes(d Deps) []observability.Route {
+	if d.Auth == nil {
+		return nil
+	}
 	if d.Now == nil {
 		d.Now = time.Now
 	}
 	h := &handlers{Deps: d}
-	routes := []observability.Route{{Pattern: "GET /thresholds", Handler: http.HandlerFunc(h.thresholds)}}
+	routes := []observability.Route{}
 	add := func(pattern string, fn http.HandlerFunc) {
-		routes = append(routes, observability.Route{Pattern: pattern, Handler: fn})
+		routes = append(routes, observability.Route{Pattern: pattern, Handler: d.Auth.Middleware(fn)})
 	}
+	add("GET /thresholds", h.thresholds)
 	if d.State != nil {
 		add("GET /greenhouses", h.greenhouses)
-		routes = append(routes, observability.Route{Pattern: "GET /greenhouses/{id}/state", Handler: state.Handler(d.State, d.Logger)})
+		routes = append(routes, observability.Route{Pattern: "GET /greenhouses/{id}/state",
+			Handler: d.Auth.Middleware(state.Handler(d.State, d.Logger))})
 	}
 	if d.Series != nil {
 		add("GET /greenhouses/{id}/series", h.series)

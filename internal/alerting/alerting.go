@@ -39,6 +39,8 @@ type Alert struct {
 	ObservedValue  float64
 	LimitValue     float64
 	AcknowledgedAt *time.Time
+	// AcknowledgedBy é o operador que reconheceu, vindo do token e nunca do corpo.
+	AcknowledgedBy *string
 	Note           *string
 }
 
@@ -46,5 +48,5 @@ type Alert struct {
 type Repository interface {
 	List(ctx context.Context, status Status, limit int) ([]Alert, error)
 	// Acknowledge devolve ErrNotFound ou ErrAlreadyAcknowledged.
-	Acknowledge(ctx context.Context, id, note string, at time.Time) (Alert, error)
+	Acknowledge(ctx context.Context, id, operator, note string, at time.Time) (Alert, error)
 }

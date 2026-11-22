@@ -67,14 +67,14 @@ func TestAlertsAckLifecycle(t *testing.T) {
 	if err != nil || len(open) != 2 {
 		t.Fatalf("abertos = %d, err=%v", len(open), err)
 	}
-	acked, err := repo.Acknowledge(ctx, "a1", "ventilação ligada", t0.Add(time.Hour))
+	acked, err := repo.Acknowledge(ctx, "a1", "ana", "ventilação ligada", t0.Add(time.Hour))
 	if err != nil || acked.AcknowledgedAt == nil || acked.Note == nil || *acked.Note != "ventilação ligada" {
 		t.Fatalf("ack = %+v, err=%v", acked, err)
 	}
-	if _, err := repo.Acknowledge(ctx, "a1", "", t0); !errors.Is(err, alerting.ErrAlreadyAcknowledged) {
+	if _, err := repo.Acknowledge(ctx, "a1", "bruno", "", t0); !errors.Is(err, alerting.ErrAlreadyAcknowledged) {
 		t.Fatalf("segundo ack deveria dar ErrAlreadyAcknowledged, veio %v", err)
 	}
-	if _, err := repo.Acknowledge(ctx, "nope", "", t0); !errors.Is(err, alerting.ErrNotFound) {
+	if _, err := repo.Acknowledge(ctx, "nope", "ana", "", t0); !errors.Is(err, alerting.ErrNotFound) {
 		t.Fatalf("inexistente deveria dar ErrNotFound, veio %v", err)
 	}
 

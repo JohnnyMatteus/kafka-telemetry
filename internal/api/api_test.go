@@ -42,9 +42,10 @@ func (f *fakeSeries) Series(_ context.Context, _ string, from, to time.Time) (ma
 }
 
 type fakeAlerts struct {
-	status alerting.Status
-	limit  int
-	ackErr error
+	status  alerting.Status
+	limit   int
+	ackErr  error
+	ackedBy string
 }
 
 func (f *fakeAlerts) List(_ context.Context, s alerting.Status, limit int) ([]alerting.Alert, error) {
@@ -53,12 +54,18 @@ func (f *fakeAlerts) List(_ context.Context, s alerting.Status, limit int) ([]al
 		WindowStart: now, WindowEnd: now.Add(time.Minute), ObservedValue: 36, LimitValue: 32}}, nil
 }
 
-func (f *fakeAlerts) Acknowledge(_ context.Context, id, note string, at time.Time) (alerting.Alert, error) {
+func (f *fakeAlerts) Acknowledge(_ context.Context, id, operator, note string, at time.Time) (alerting.Alert, error) {
+	f.ackedBy = operator
 	if f.ackErr != nil {
 		return alerting.Alert{}, f.ackErr
 	}
-	return alerting.Alert{ID: id, GreenhouseID: "gh-001", AcknowledgedAt: &at, Note: &note}, nil
+	return alerting.Alert{ID: id, GreenhouseID: "gh-001", AcknowledgedAt: &at, AcknowledgedBy: &operator, Note: &note}, nil
 }
+
+const (
+	anaToken   = "dev-only-token-ana"
+	brunoToken = "dev-only-token-bruno"
+)
 
 type fakeDLQ struct{ limit int }
 
@@ -84,8 +91,13 @@ type fixture struct {
 func newFixture(t *testing.T, health fakeHealth) fixture {
 	t.Helper()
 	f := fixture{series: &fakeSeries{}, alerts: &fakeAlerts{}, dlq: &fakeDLQ{}}
+	auth, err := api.NewOperatorAuth([]string{"ana:" + anaToken, "bruno:" + brunoToken})
+	if err != nil {
+		t.Fatal(err)
+	}
 	mux := http.NewServeMux()
 	for _, r := range api.Routes(api.Deps{
+		Auth:   auth,
 		State:  fakeState{list: []state.Greenhouse{{GreenhouseID: "gh-001", Sensors: map[string]state.Sensor{"TEMPERATURE": {Mean: 20, Unit: "celsius"}}}}},
 		Series: f.series, Alerts: f.alerts, DLQ: f.dlq, Health: health,
 		Thresholds: telemetry.Thresholds{telemetry.SensorTemperature: {Min: 12, Max: 32}},
@@ -99,11 +111,20 @@ func newFixture(t *testing.T, health fakeHealth) fixture {
 	return f
 }
 
+// do envia com o token da Ana; doWith aceita outro cabeçalho Authorization.
 func (f fixture) do(t *testing.T, method, path, body string) (int, map[string]any) {
+	t.Helper()
+	return f.doWith(t, method, path, body, "Bearer "+anaToken)
+}
+
+func (f fixture) doWith(t *testing.T, method, path, body, authorization string) (int, map[string]any) {
 	t.Helper()
 	req, err := http.NewRequest(method, f.srv.URL+path, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -175,6 +196,9 @@ func TestAlertsListFilterAndAckContract(t *testing.T) {
 	if code != 200 || body["note"] != "ventilação ligada" || body["acknowledged_at"] != "2026-03-10T12:00:00Z" {
 		t.Fatalf("ack: code=%d body=%v", code, body)
 	}
+	if body["acknowledged_by"] != "ana" || f.alerts.ackedBy != "ana" {
+		t.Fatalf("o reconhecimento deve gravar o operador do token: body=%v gravado=%q", body, f.alerts.ackedBy)
+	}
 	if code, _ = f.do(t, "POST", "/alerts/a1/ack", `{"note":`); code != 400 {
 		t.Errorf("JSON inválido: %d", code)
 	}
@@ -213,9 +237,60 @@ func TestDLQAndHealth(t *testing.T) {
 	}
 }
 
-func TestRoutesAreOptionalPerPort(t *testing.T) {
+func TestNoRoutesWithoutOperatorAuth(t *testing.T) {
 	routes := api.Routes(api.Deps{Thresholds: telemetry.DefaultThresholds(), Logger: slog.Default()})
+	if len(routes) != 0 {
+		t.Fatalf("sem Auth a API não pode abrir nenhuma rota: %+v", routes)
+	}
+}
+
+func TestRoutesAreOptionalPerPort(t *testing.T) {
+	auth, err := api.NewOperatorAuth([]string{"ana:" + anaToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes := api.Routes(api.Deps{Auth: auth, Thresholds: telemetry.DefaultThresholds(), Logger: slog.Default()})
 	if len(routes) != 1 || routes[0].Pattern != "GET /thresholds" {
 		t.Fatalf("sem portas só /thresholds deveria existir: %+v", routes)
+	}
+}
+
+func TestRequestsWithoutValidTokenGet401(t *testing.T) {
+	f := newFixture(t, fakeHealth{})
+	paths := []struct{ method, path string }{
+		{"GET", "/thresholds"}, {"GET", "/greenhouses"}, {"GET", "/greenhouses/gh-001/series"},
+		{"GET", "/alerts?status=open"}, {"POST", "/alerts/a1/ack"}, {"GET", "/dlq"}, {"GET", "/pipeline/health"},
+	}
+	for _, p := range paths {
+		for _, header := range []string{"", "Basic " + anaToken, "Bearer ", "Bearer dev-only-token-x"} {
+			if code, _ := f.doWith(t, p.method, p.path, "{}", header); code != 401 {
+				t.Errorf("%s %s com cabeçalho %q: código %d, esperado 401", p.method, p.path, header, code)
+			}
+		}
+	}
+	if f.alerts.ackedBy != "" {
+		t.Fatalf("requisição sem token não pode reconhecer alerta, gravou %q", f.alerts.ackedBy)
+	}
+}
+
+func TestOperatorIsTheTokenOwner(t *testing.T) {
+	f := newFixture(t, fakeHealth{})
+	code, body := f.doWith(t, "POST", "/alerts/a1/ack", `{"note":"ok","acknowledged_by":"ana"}`, "Bearer "+brunoToken)
+	if code != 200 || body["acknowledged_by"] != "bruno" || f.alerts.ackedBy != "bruno" {
+		t.Fatalf("o operador vem do token, não do corpo: code=%d body=%v gravado=%q", code, body, f.alerts.ackedBy)
+	}
+}
+
+func TestOperatorAuthConfigValidation(t *testing.T) {
+	cases := map[string][]string{
+		"sem dois pontos":   {"ana-dev-only-token"},
+		"token curto":       {"ana:curto"},
+		"operador repetido": {"ana:dev-only-token-1", "ANA:dev-only-token-2"},
+		"lista vazia":       {},
+	}
+	for name, entries := range cases {
+		if _, err := api.NewOperatorAuth(entries); err == nil {
+			t.Errorf("%s: deveria recusar %v", name, entries)
+		}
 	}
 }

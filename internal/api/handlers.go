@@ -108,12 +108,13 @@ type alertJSON struct {
 	ObservedValue  float64    `json:"observed_value"`
 	LimitValue     float64    `json:"limit_value"`
 	AcknowledgedAt *time.Time `json:"acknowledged_at"`
+	AcknowledgedBy *string    `json:"acknowledged_by"`
 	Note           *string    `json:"note"`
 }
 
 func toAlertJSON(a alerting.Alert) alertJSON {
 	return alertJSON{a.ID, a.GreenhouseID, a.SensorType, a.WindowStart, a.WindowEnd, a.Rule,
-		a.ObservedValue, a.LimitValue, a.AcknowledgedAt, a.Note}
+		a.ObservedValue, a.LimitValue, a.AcknowledgedAt, a.AcknowledgedBy, a.Note}
 }
 
 // parseLimit lê ?limit= com padrão e teto; ok=false já respondeu 400.
@@ -165,7 +166,7 @@ func (h *handlers) ackAlert(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "note excede 500 caracteres")
 		return
 	}
-	a, err := h.Alerts.Acknowledge(r.Context(), r.PathValue("id"), body.Note, h.Now().UTC())
+	a, err := h.Alerts.Acknowledge(r.Context(), r.PathValue("id"), Operator(r.Context()), body.Note, h.Now().UTC())
 	switch {
 	case errors.Is(err, alerting.ErrNotFound):
 		writeError(w, http.StatusNotFound, "alerta inexistente")

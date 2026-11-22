@@ -39,7 +39,8 @@ func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 func (s *Store) migrate(ctx context.Context) error {
 	_, err := s.pool.Exec(ctx, `
 ALTER TABLE greenhouse_alerts ADD COLUMN IF NOT EXISTS acknowledged_at TIMESTAMPTZ;
-ALTER TABLE greenhouse_alerts ADD COLUMN IF NOT EXISTS note TEXT;`)
+ALTER TABLE greenhouse_alerts ADD COLUMN IF NOT EXISTS note TEXT;
+ALTER TABLE greenhouse_alerts ADD COLUMN IF NOT EXISTS acknowledged_by TEXT;`)
 	if err != nil {
 		return fmt.Errorf("postgres: migrar alertas: %w", err)
 	}

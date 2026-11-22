@@ -12,7 +12,7 @@ import (
 )
 
 const alertColumns = `alert_id, greenhouse_id, sensor_type, window_start, window_end, rule,
-	observed_value, limit_value, acknowledged_at, note`
+	observed_value, limit_value, acknowledged_at, acknowledged_by, note`
 
 // Alerts implementa alerting.Repository.
 type Alerts struct{ store *Store }
@@ -23,7 +23,7 @@ func (s *Store) Alerts() *Alerts { return &Alerts{store: s} }
 func scanAlert(row pgx.Row) (alerting.Alert, error) {
 	var a alerting.Alert
 	err := row.Scan(&a.ID, &a.GreenhouseID, &a.SensorType, &a.WindowStart, &a.WindowEnd, &a.Rule,
-		&a.ObservedValue, &a.LimitValue, &a.AcknowledgedAt, &a.Note)
+		&a.ObservedValue, &a.LimitValue, &a.AcknowledgedAt, &a.AcknowledgedBy, &a.Note)
 	a.WindowStart, a.WindowEnd = a.WindowStart.UTC(), a.WindowEnd.UTC()
 	if a.AcknowledgedAt != nil {
 		t := a.AcknowledgedAt.UTC()
@@ -60,14 +60,14 @@ func (r *Alerts) List(ctx context.Context, status alerting.Status, limit int) ([
 
 // Acknowledge reconhece de forma atômica: o UPDATE condicional impede que dois
 // operadores reconheçam o mesmo alerta; quem perde descobre o motivo depois.
-func (r *Alerts) Acknowledge(ctx context.Context, id, note string, at time.Time) (alerting.Alert, error) {
+func (r *Alerts) Acknowledge(ctx context.Context, id, operator, note string, at time.Time) (alerting.Alert, error) {
 	var storedNote *string
 	if note != "" {
 		storedNote = &note
 	}
 	a, err := scanAlert(r.store.pool.QueryRow(ctx,
-		`UPDATE greenhouse_alerts SET acknowledged_at = $2, note = $3
-		 WHERE alert_id = $1 AND acknowledged_at IS NULL RETURNING `+alertColumns, id, at, storedNote))
+		`UPDATE greenhouse_alerts SET acknowledged_at = $2, acknowledged_by = $3, note = $4
+		 WHERE alert_id = $1 AND acknowledged_at IS NULL RETURNING `+alertColumns, id, at, operator, storedNote))
 	if err == nil {
 		return a, nil
 	}

@@ -38,6 +38,7 @@ type settings struct {
 	linger         time.Duration
 	window         telemetry.WindowConfig
 	thresholds     telemetry.Thresholds
+	operators      *api.OperatorAuth
 }
 
 func main() { os.Exit(realMain()) }
@@ -78,6 +79,14 @@ func load() (settings, error) {
 	s.thresholds = env.Thresholds()
 	if err := env.Err(); err != nil {
 		return s, err
+	}
+	// Sem OPERATOR_TOKENS a API de consulta fica desligada, em vez de aberta.
+	if entries := env.List("OPERATOR_TOKENS", ""); len(entries) > 0 {
+		auth, err := api.NewOperatorAuth(entries)
+		if err != nil {
+			return s, err
+		}
+		s.operators = auth
 	}
 	return s, s.window.Validate()
 }
@@ -120,7 +129,10 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 
 	// Cada fonte da API é opcional: sem Redis ou Postgres configurado, as rotas
 	// que dependem dela simplesmente não existem.
-	apiDeps := api.Deps{Thresholds: s.thresholds, Logger: logger}
+	apiDeps := api.Deps{Thresholds: s.thresholds, Logger: logger, Auth: s.operators}
+	if s.operators == nil {
+		logger.Warn("OPERATOR_TOKENS vazio: API de consulta desligada")
+	}
 	var stateStore aggregation.StateStore
 	if s.redisAddr != "" {
 		rdb := redis.NewClient(&redis.Options{Addr: s.redisAddr})

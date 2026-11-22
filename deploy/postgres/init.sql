@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS greenhouse_alerts (
     limit_value    DOUBLE PRECISION NOT NULL,
     -- Preenchidas pela API de consulta; o sink JDBC não toca nestas colunas.
     acknowledged_at TIMESTAMPTZ,
+    acknowledged_by TEXT,
     note            TEXT
 );
 
