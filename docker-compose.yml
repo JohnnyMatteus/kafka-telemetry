@@ -3,7 +3,7 @@
 #   docker compose --profile core --profile observability up -d --build
 # Profiles:
 #   core           Kafka (KRaft), Schema Registry, Connect, Postgres, MinIO, Redis, init, simulador e agregador
-#   observability  Prometheus e Jaeger
+#   observability  Prometheus, Grafana (dashboards e SLOs) e Jaeger
 #   tools          Kafka UI
 #   secure         Kafka com TLS+mTLS, SASL e ACLs por serviço e Schema Registry autenticado
 #                  (make secure-init e make up-secure; exclui Connect, MinIO, web e observabilidade)
@@ -559,6 +559,30 @@ services:
       - prometheus-data:/prometheus
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Dashboards versionados em deploy/grafana (pipeline, SLOs e notificador).
+  grafana:
+    profiles: ["observability"]
+    image: grafana/grafana:11.3.1
+    networks: [telemetry-net]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-dev-only-change-me}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health >/dev/null"]
       interval: 10s
       timeout: 5s
       retries: 10
