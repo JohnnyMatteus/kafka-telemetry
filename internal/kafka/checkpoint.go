@@ -33,6 +33,9 @@ func NewCheckpointStore(client *kgo.Client, seeds []string, topic string) *Check
 type checkpointValue struct {
 	Offset      int64 `json:"offset"`
 	WatermarkMs int64 `json:"watermark_ms"`
+	// WatermarksMs é o watermark de cada chave (estufa; "" é o piso). Ausente
+	// nos checkpoints antigos, que continuam legíveis.
+	WatermarksMs map[string]int64 `json:"watermarks_ms,omitempty"`
 }
 
 // Save grava os checkpoints e espera a confirmação do broker.
@@ -43,7 +46,11 @@ func (s *CheckpointStore) Save(ctx context.Context, cps []aggregation.Checkpoint
 		if !cp.Watermark.IsZero() {
 			wm = cp.Watermark.UnixMilli()
 		}
-		value, err := json.Marshal(checkpointValue{Offset: cp.Offset, WatermarkMs: wm})
+		perKey := make(map[string]int64, len(cp.Watermarks))
+		for k, w := range cp.Watermarks {
+			perKey[k] = w.UnixMilli()
+		}
+		value, err := json.Marshal(checkpointValue{Offset: cp.Offset, WatermarkMs: wm, WatermarksMs: perKey})
 		if err != nil {
 			return err
 		}
@@ -131,6 +138,12 @@ func decodeCheckpoint(key, value []byte) (aggregation.Checkpoint, error) {
 	}
 	if v.WatermarkMs != 0 {
 		cp.Watermark = time.UnixMilli(v.WatermarkMs).UTC()
+	}
+	if len(v.WatermarksMs) > 0 {
+		cp.Watermarks = make(map[string]time.Time, len(v.WatermarksMs))
+		for k, ms := range v.WatermarksMs {
+			cp.Watermarks[k] = time.UnixMilli(ms).UTC()
+		}
 	}
 	return cp, nil
 }

@@ -107,7 +107,7 @@ A frase para a entrevista: **"exactly-once do Kafka é exactly-once dentro do Ka
 
 - Leituras atrasadas além da tolerância (10 s) são descartadas e contadas, não corrigem o agregado já emitido.
 - O tópico de checkpoint é relido inteiro a cada rebalance (é pequeno: uma mensagem por partição).
-- Partição sem tráfego não avança o watermark e segura janelas.
+- Uma estufa (ou a partição, com `WATERMARK_SCOPE=partition`) sem tráfego só tem as janelas fechadas depois de `WATERMARK_IDLE_TIMEOUT`, por `Service.Tick`, na mesma ordem publicar → checkpoint → commit ([ADR 0014](../adr/0014-watermark-por-estufa-e-ocioso.md)).
 - Uma falha de publish derruba o processo (fail-fast) em vez de tentar recuperar o estado em memória.
 
 ## 6. Perguntas que um entrevistador faria

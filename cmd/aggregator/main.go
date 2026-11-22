@@ -76,6 +76,10 @@ func load() (settings, error) {
 		window: telemetry.WindowConfig{
 			Size:            env.Duration("WINDOW_SIZE", time.Minute),
 			AllowedLateness: env.Duration("ALLOWED_LATENESS", 10*time.Second),
+			// "greenhouse" isola o relógio de cada estufa; "partition" é o
+			// comportamento anterior. IdleTimeout 0 desliga o watermark ocioso.
+			Scope:       telemetry.WatermarkScope(env.String("WATERMARK_SCOPE", string(telemetry.ScopeGreenhouse))),
+			IdleTimeout: env.Duration("WATERMARK_IDLE_TIMEOUT", 2*time.Minute),
 		},
 	}
 	s.thresholds = env.Thresholds()
@@ -124,6 +128,7 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 		MaxPollRecords: s.maxPollRecords,
 		Linger:         s.linger,
 		Hooks:          tracing.Hooks,
+		TickInterval:   tickInterval(s.window),
 	}, logger)
 	if err != nil {
 		return err
@@ -213,4 +218,13 @@ func encoderFor(ctx context.Context, registry *kafka.Registry, topic string) (*c
 		return nil, err
 	}
 	return contract.NewEncoder(id, text)
+}
+
+// tickInterval acorda o laço de consumo para fechar janelas ociosas; sem
+// watermark ocioso não há motivo para acordar.
+func tickInterval(w telemetry.WindowConfig) time.Duration {
+	if w.IdleTimeout <= 0 {
+		return 0
+	}
+	return min(time.Second, w.IdleTimeout)
 }

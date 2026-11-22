@@ -1,6 +1,6 @@
 # 0005. Janelas tumbling por tempo de evento com watermark por partição
 
-- Status: Aceito
+- Status: Aceito; o watermark por partição foi evoluído pelo [ADR 0014](0014-watermark-por-estufa-e-ocioso.md) (por estufa e ocioso)
 - Data: 2026-11-21
 
 ## Contexto

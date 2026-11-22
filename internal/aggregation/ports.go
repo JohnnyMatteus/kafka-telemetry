@@ -38,8 +38,13 @@ type Message struct {
 // duplicar janelas: o offset seguro e o watermark no momento do commit.
 type Checkpoint struct {
 	TopicPartition
-	Offset    int64
+	Offset int64
+	// Watermark é o mais avançado entre as chaves; checkpoints antigos só têm
+	// este valor.
 	Watermark time.Time
+	// Watermarks é o watermark de cada chave (estufa, ou "" para a partição
+	// e para o piso). Vazio em checkpoints antigos.
+	Watermarks map[string]time.Time
 }
 
 // Publisher publica mensagens e só retorna depois da confirmação do broker
@@ -91,6 +96,7 @@ type Observer interface {
 	EndToEndLatency(d time.Duration)
 	PartitionState(tp TopicPartition, openWindows, trackedEvents int, watermark time.Time)
 	Committed(tp TopicPartition, offset int64)
+	IdleClosed(windows int)
 }
 
 // NopObserver descarta todos os eventos.
@@ -102,3 +108,4 @@ func (NopObserver) Emitted(int, int)                                   {}
 func (NopObserver) EndToEndLatency(time.Duration)                      {}
 func (NopObserver) PartitionState(TopicPartition, int, int, time.Time) {}
 func (NopObserver) Committed(TopicPartition, int64)                    {}
+func (NopObserver) IdleClosed(int)                                     {}

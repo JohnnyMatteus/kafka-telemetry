@@ -38,3 +38,21 @@ func TestZeroWatermarkStaysZero(t *testing.T) {
 		t.Fatalf("watermark = %v err = %v", cp.Watermark, err)
 	}
 }
+
+// O checkpoint novo carrega o watermark de cada estufa; o antigo, sem o mapa,
+// continua legível.
+func TestCheckpointCarriesPerGreenhouseWatermarks(t *testing.T) {
+	a := time.Date(2026, 3, 10, 12, 1, 0, 0, time.UTC)
+	b := a.Add(time.Minute)
+	cp, err := decodeCheckpoint([]byte("t/0"), []byte(fmt.Sprintf(`{"offset":7,"watermark_ms":%d,"watermarks_ms":{"gh-A":%d,"":%d}}`, b.UnixMilli(), b.UnixMilli(), a.UnixMilli())))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cp.Watermarks["gh-A"].Equal(b) || !cp.Watermarks[""].Equal(a) || !cp.Watermark.Equal(b) {
+		t.Fatalf("checkpoint = %+v", cp)
+	}
+	legacy, err := decodeCheckpoint([]byte("t/0"), []byte(fmt.Sprintf(`{"offset":7,"watermark_ms":%d}`, a.UnixMilli())))
+	if err != nil || len(legacy.Watermarks) != 0 || !legacy.Watermark.Equal(a) {
+		t.Fatalf("legacy = %+v err=%v", legacy, err)
+	}
+}

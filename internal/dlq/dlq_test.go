@@ -449,3 +449,29 @@ func TestReplayAgainstTheAggregatorDoesNotLoseLateReadings(t *testing.T) {
 		t.Fatalf("again = %+v enviadas=%d", again, len(f.pub.sent))
 	}
 }
+
+// Com watermark por estufa, o relógio adiantado de uma estufa não torna
+// atrasada a leitura de outra: a classificação usa o watermark da própria.
+func TestClassificationUsesTheGreenhouseWatermark(t *testing.T) {
+	reg := newRegistry(t)
+	enc, _ := contract.NewEncoder(1, reg.schemas[1])
+	value := func(gh string) []byte {
+		v, err := enc.Encode(contract.NewSensorReadingRecord(telemetry.Reading{EventID: "e-" + gh, GreenhouseID: gh, SensorID: gh + "-t",
+			Type: telemetry.SensorTemperature, Value: 22, MeasuredAt: t0}, "1.0.0"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	f := newFixture(t, nil, func(fixture) []dlq.Entry {
+		return []dlq.Entry{entryWith(0, "unknown_schema", readings, value("gh-001")), entryWith(1, "unknown_schema", readings, value("gh-002"))}
+	})
+	f.cps.cps[aggregation.TopicPartition{Topic: readings, Partition: 0}] = aggregation.Checkpoint{
+		Watermark:  t0.Add(10 * time.Minute),
+		Watermarks: map[string]time.Time{"gh-001": t0.Add(10 * time.Minute), "gh-002": t0.Add(10 * time.Second)},
+	}
+	res, err := f.r.Run(context.Background(), dlq.Request{Operator: "ana"})
+	if err != nil || len(res.Selected) != 1 || res.Selected[0].Offset != 1 || len(res.Blocked) != 1 || res.Blocked[0].Offset != 0 {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}

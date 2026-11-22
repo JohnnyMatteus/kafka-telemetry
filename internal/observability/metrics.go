@@ -22,6 +22,7 @@ type AggregatorMetrics struct {
 	deadLetter *prometheus.CounterVec
 	aggregates prometheus.Counter
 	alerts     prometheus.Counter
+	idleClosed prometheus.Counter
 	consumed   prometheus.Counter
 	consumedN  atomic.Int64
 	lag        *prometheus.GaugeVec
@@ -49,6 +50,9 @@ func NewAggregatorMetrics(reg prometheus.Registerer) *AggregatorMetrics {
 		alerts: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "telemetry_aggregator_alerts_emitted_total", Help: "Alertas de limite publicados.",
 		}),
+		idleClosed: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "telemetry_aggregator_idle_windows_closed_total", Help: "Janelas fechadas pelo watermark ocioso, sem tráfego novo.",
+		}),
 		consumed: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "telemetry_aggregator_records_consumed_total", Help: "Registros lidos do tópico de leituras (throughput).",
 		}),
@@ -74,7 +78,7 @@ func NewAggregatorMetrics(reg prometheus.Registerer) *AggregatorMetrics {
 			Name: "telemetry_aggregator_batch_duration_seconds", Help: "Duração do processamento de um lote, incluindo publish e commit.", Buckets: latencyBuckets,
 		}),
 	}
-	reg.MustRegister(m.records, m.deadLetter, m.aggregates, m.alerts, m.consumed, m.lag, m.openWin, m.tracked, m.watermark, m.committed, m.endToEnd, m.batch)
+	reg.MustRegister(m.records, m.deadLetter, m.aggregates, m.alerts, m.idleClosed, m.consumed, m.lag, m.openWin, m.tracked, m.watermark, m.committed, m.endToEnd, m.batch)
 	return m
 }
 
@@ -88,6 +92,7 @@ func (m *AggregatorMetrics) Emitted(aggregates, alerts int) {
 	m.aggregates.Add(float64(aggregates))
 	m.alerts.Add(float64(alerts))
 }
+func (m *AggregatorMetrics) IdleClosed(n int)                { m.idleClosed.Add(float64(n)) }
 func (m *AggregatorMetrics) EndToEndLatency(d time.Duration) { m.endToEnd.Observe(d.Seconds()) }
 func (m *AggregatorMetrics) PartitionState(tp aggregation.TopicPartition, open, tracked int, wm time.Time) {
 	l := labels(tp)

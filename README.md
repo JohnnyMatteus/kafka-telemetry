@@ -138,7 +138,7 @@ Resultado do teste de carga e métricas observadas: [docs/teste-de-carga.md](doc
 | [0002](docs/adr/0002-cliente-franz-go.md) | franz-go como cliente Kafka (Go puro) |
 | [0003](docs/adr/0003-at-least-once-com-idempotencia.md) | At-least-once com idempotência e checkpoint, em vez de EOS transacional |
 | [0004](docs/adr/0004-compatibilidade-backward.md) | BACKWARD no registry, BACKWARD_TRANSITIVE no CI |
-| [0005](docs/adr/0005-janelas-por-tempo-de-evento.md) | Janelas por tempo de evento com watermark por partição |
+| [0005](docs/adr/0005-janelas-por-tempo-de-evento.md) | Janelas por tempo de evento com watermark (por partição; por estufa desde o 0014) |
 | [0006](docs/adr/0006-kafka-kraft-e-redpanda-nos-testes.md) | Kafka KRaft no compose, Redpanda nos testes |
 | [0007](docs/adr/0007-data-lake-no-minio-com-s3-sink.md) | Data lake no MinIO com S3 sink em Parquet |
 | [0008](docs/adr/0008-sink-jdbc-upsert-no-postgres.md) | Sink JDBC com upsert no Postgres |
@@ -147,6 +147,7 @@ Resultado do teste de carga e métricas observadas: [docs/teste-de-carga.md](doc
 | [0011](docs/adr/0011-autenticacao-de-operador-na-api.md) | Autenticação de operador por token e autoria no reconhecimento |
 | [0012](docs/adr/0012-reprocessador-da-dlq.md) | Reprocessador da DLQ: destino fixo, dry-run, ledger e autoria |
 | [0013](docs/adr/0013-notificador-de-alertas.md) | Notificador de alertas: e-mail e webhook assinado, idempotência e retry |
+| [0014](docs/adr/0014-watermark-por-estufa-e-ocioso.md) | Watermark por estufa e fechamento ocioso por tempo de processamento |
 
 ## Trade-offs
 
@@ -155,12 +156,11 @@ Resultado do teste de carga e métricas observadas: [docs/teste-de-carga.md](doc
 - **Leituras com mais de 10 s de atraso são descartadas** e contadas, não corrigem o agregado já emitido.
 - **Alertas pela média da janela** evitam falso alarme por pico isolado, ao custo de até ~70 s de latência.
 - **O registry está no caminho de leitura**; cache e retry sem DLQ seguram indisponibilidades curtas.
-- **Watermark por partição**: uma partição sem tráfego segura suas janelas.
+- **Watermark por estufa com fechamento ocioso**: uma estufa calada só tem as janelas fechadas depois de `WATERMARK_IDLE_TIMEOUT` (2 min), e uma leitura reenviada depois disso é descartada como atrasada ([ADR 0014](docs/adr/0014-watermark-por-estufa-e-ocioso.md)).
 
 ## Próximos passos
 
 - Rodar `make loadtest` numa máquina dedicada e registrar as métricas em [docs/teste-de-carga.md](docs/teste-de-carga.md) (a rodada formal foi adiada para economizar recursos).
-- Watermark ocioso (por tempo de processamento) e watermark por estufa.
 - Backfill de janelas fechadas para o reprocessador da DLQ recuperar leituras antigas ([ADR 0012](docs/adr/0012-reprocessador-da-dlq.md)).
 - Cadastro de produtores fora de arquivo ([ADR 0013](docs/adr/0013-notificador-de-alertas.md)).
 - Extrair a API para um `cmd/api` se a carga de leitura crescer. A autenticação por token de operador e a autoria do reconhecimento de alertas já existem ([ADR 0011](docs/adr/0011-autenticacao-de-operador-na-api.md)).
