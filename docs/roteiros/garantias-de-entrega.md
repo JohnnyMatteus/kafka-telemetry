@@ -36,7 +36,7 @@ Para cada lote retornado pelo poll:
 2. Descarta duplicatas por `event_id` e leituras de janelas já fechadas.
 3. Fecha as janelas cujo fim passou do watermark.
 4. **Publica** DLQ, agregados e alertas e espera o ack de todos.
-5. **Grava o checkpoint** de cada partição tocada: offset seguro + watermark.
+5. **Grava o checkpoint** de cada partição tocada quando o offset seguro ou algum watermark mudou: offset seguro + watermarks (o commit do passo seguinte só acontece se o offset mudou).
 6. **Commita** o offset seguro.
 
 Se qualquer passo falha, o processo para sem commitar. O orquestrador reinicia, e a partição recomeça do último commit.

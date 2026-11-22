@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strconv"
 	"time"
 
@@ -62,6 +63,8 @@ type Service struct {
 	partitions map[TopicPartition]*telemetry.PartitionWindows
 	restored   map[TopicPartition]Checkpoint
 	committed  map[TopicPartition]int64
+	// checkpointed guarda os watermarks do último checkpoint gravado por partição.
+	checkpointed map[TopicPartition]map[string]time.Time
 }
 
 // New cria o serviço.
@@ -96,6 +99,8 @@ func New(window telemetry.WindowConfig, thresholds telemetry.Thresholds, topics 
 		partitions: make(map[TopicPartition]*telemetry.PartitionWindows),
 		restored:   make(map[TopicPartition]Checkpoint),
 		committed:  make(map[TopicPartition]int64),
+
+		checkpointed: make(map[TopicPartition]map[string]time.Time),
 	}, nil
 }
 
@@ -135,6 +140,7 @@ func (s *Service) Drop(tps []TopicPartition) {
 		delete(s.partitions, tp)
 		delete(s.restored, tp)
 		delete(s.committed, tp)
+		delete(s.checkpointed, tp)
 	}
 }
 
@@ -373,6 +379,11 @@ func (s *Service) emit(agg telemetry.Aggregate) ([]Message, SensorState, error) 
 	return append(msgs, Message{Topic: s.topics.Alerts, Key: key, Value: value}), state, nil
 }
 
+// checkpointAndCommit grava o checkpoint quando o offset seguro OU qualquer
+// watermark mudou, e commita só quando o offset mudou. Com watermark por
+// estufa, uma estufa com janela aberta segura o offset enquanto as outras
+// fecham janelas e avançam os próprios watermarks; sem gravá-los, um crash
+// releria do offset antigo e republicaria janelas já emitidas.
 func (s *Service) checkpointAndCommit(ctx context.Context, tps []TopicPartition) error {
 	var cps []Checkpoint
 	offsets := make(map[TopicPartition]int64)
@@ -382,18 +393,29 @@ func (s *Service) checkpointAndCommit(ctx context.Context, tps []TopicPartition)
 			continue
 		}
 		offset := p.CommitOffset()
+		wms := p.Watermarks()
 		s.deps.Observer.PartitionState(tp, p.OpenWindows(), p.TrackedEvents(), p.Watermark())
-		if last, ok := s.committed[tp]; ok && last == offset {
+		last, committed := s.committed[tp]
+		offsetChanged := !committed || last != offset
+		if !offsetChanged && maps.Equal(s.checkpointed[tp], wms) {
 			continue
 		}
-		cps = append(cps, Checkpoint{TopicPartition: tp, Offset: offset, Watermark: p.Watermark(), Watermarks: p.Watermarks()})
-		offsets[tp] = offset
+		cps = append(cps, Checkpoint{TopicPartition: tp, Offset: offset, Watermark: p.Watermark(), Watermarks: wms})
+		if offsetChanged {
+			offsets[tp] = offset
+		}
 	}
-	if len(offsets) == 0 {
+	if len(cps) == 0 {
 		return nil
 	}
 	if err := s.deps.Checkpoints.Save(ctx, cps); err != nil {
 		return fmt.Errorf("gravar checkpoint: %w", err)
+	}
+	for _, cp := range cps {
+		s.checkpointed[cp.TopicPartition] = cp.Watermarks
+	}
+	if len(offsets) == 0 {
+		return nil
 	}
 	if err := s.deps.Committer.Commit(ctx, offsets); err != nil {
 		return fmt.Errorf("commitar offsets: %w", err)

@@ -146,3 +146,76 @@ func TestTickIsANoopWithoutIdleTimeout(t *testing.T) {
 		t.Fatalf("err=%v calls=%v", err, h.calls)
 	}
 }
+
+// A estufa A segura o offset seguro (janela aberta) enquanto a B fecha janelas
+// por evento e por ociosidade. Cada avanço de watermark da B precisa ir para o
+// checkpoint, senão um crash relê do offset antigo e republica as janelas.
+func TestCheckpointRecordsWatermarksEvenWhenTheSafeOffsetDoesNotMove(t *testing.T) {
+	h := newHarness(t)
+	now := t0.Add(30 * time.Second)
+	window := telemetry.WindowConfig{Size: time.Minute, AllowedLateness: 5 * time.Second, Scope: telemetry.ScopeGreenhouse, IdleTimeout: 2 * time.Minute}
+	svc := h.idleService(window, &now, nil)
+	ctx := context.Background()
+	_ = svc.Assign(ctx, []aggregation.TopicPartition{tp})
+
+	a0 := h.record(0, gh("gh-A", 20, 10*time.Second))
+	b1 := h.record(1, gh("gh-B", 21, 10*time.Second))
+	if err := svc.HandleBatch(ctx, []aggregation.Record{a0, b1}); err != nil {
+		t.Fatal(err)
+	}
+	if h.checkpoints[tp].Offset != 0 || h.commits[tp] != 0 {
+		t.Fatalf("a janela aberta da A segura o offset em 0: %+v commits=%v", h.checkpoints[tp], h.commits)
+	}
+
+	// B fecha a janela 0 por evento; o offset seguro continua em 0.
+	now = t0.Add(80 * time.Second)
+	b2 := h.record(2, gh("gh-B", 22, 75*time.Second))
+	h.calls, h.published = nil, nil
+	if err := svc.HandleBatch(ctx, []aggregation.Record{b2}); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.onTopic("greenhouse.aggregates")) != 1 {
+		t.Fatalf("a janela 0 da B devia ter fechado por evento: %d", len(h.onTopic("greenhouse.aggregates")))
+	}
+	if got, want := h.checkpoints[tp].Watermarks["gh-B"], t0.Add(70*time.Second); !got.Equal(want) {
+		t.Fatalf("checkpoint sem o watermark da B por evento: %v, quero %v", got, want)
+	}
+	if !slices.Equal(h.calls, []string{"publish", "checkpoint"}) {
+		t.Fatalf("offset não mudou, então grava o checkpoint e não commita: %v", h.calls)
+	}
+
+	// B fica ociosa e a janela 1 fecha pelo Tick; o checkpoint acompanha.
+	// A segue falando (mesma janela aberta), então só a B está ociosa.
+	now = t0.Add(80*time.Second + 3*time.Minute)
+	a3 := h.record(3, gh("gh-A", 23, 20*time.Second))
+	if err := svc.HandleBatch(ctx, []aggregation.Record{a3}); err != nil {
+		t.Fatal(err)
+	}
+	h.calls, h.published = nil, nil
+	if err := svc.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := h.checkpoints[tp].Watermarks["gh-B"], t0.Add(2*time.Minute); !got.Equal(want) {
+		t.Fatalf("checkpoint sem o watermark da B por ociosidade: %v, quero %v", got, want)
+	}
+	if h.checkpoints[tp].Offset != 0 {
+		t.Fatalf("a A continua segurando o offset: %+v", h.checkpoints[tp])
+	}
+
+	// Crash e reinício: relê do offset 0 e a B não é republicada.
+	obs := &outcomeLog{}
+	svc2 := h.idleService(window, &now, obs)
+	_ = svc2.Assign(ctx, []aggregation.TopicPartition{tp})
+	h.published = nil
+	if err := svc2.HandleBatch(ctx, []aggregation.Record{a0, b1, b2, a3}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(obs.outcomes, []string{"accepted", "late", "late", "accepted"}) {
+		t.Fatalf("depois do reinício só a A (janela aberta) é aceita: %v", obs.outcomes)
+	}
+	for _, m := range h.onTopic("greenhouse.aggregates") {
+		if h.decodeAggregate(m).GreenhouseID == "gh-B" {
+			t.Fatal("janela da B republicada depois do reinício")
+		}
+	}
+}
