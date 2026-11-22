@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/config"
+	"github.com/JohnnyMatteus/kafka-telemetry/internal/telemetry"
 )
 
 func TestEnvDefaultsAndOverrides(t *testing.T) {
@@ -37,5 +38,27 @@ func TestEnvAccumulatesErrors(t *testing.T) {
 	env.Float("KT_RATIO", 0)
 	if err := env.Err(); err == nil {
 		t.Fatal("esperava erros acumulados")
+	}
+}
+
+func TestThresholdsOverrideAndValidation(t *testing.T) {
+	t.Setenv("THRESHOLD_TEMPERATURE_MAX", "28.5")
+	var e config.Env
+	th := e.Thresholds()
+	if err := e.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if got := th[telemetry.SensorTemperature]; got.Min != 12 || got.Max != 28.5 {
+		t.Fatalf("limite de temperatura = %+v", got)
+	}
+	if got := th[telemetry.SensorHumidity]; got.Min != 50 || got.Max != 90 {
+		t.Fatalf("umidade deveria manter o padrão, veio %+v", got)
+	}
+
+	t.Setenv("THRESHOLD_HUMIDITY_MIN", "95")
+	var bad config.Env
+	bad.Thresholds()
+	if bad.Err() == nil {
+		t.Fatal("mínimo acima do máximo deveria ser erro")
 	}
 }

@@ -11,6 +11,9 @@ import (
 
 var validID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
+// ValidID informa se o id tem o formato aceito de estufa.
+func ValidID(id string) bool { return validID.MatchString(id) }
+
 // Handler serve GET /greenhouses/{id}/state.
 func Handler(r Reader, logger *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {

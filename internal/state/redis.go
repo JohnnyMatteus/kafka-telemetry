@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/redis/go-redis/v9"
 
@@ -82,6 +84,46 @@ func (s *RedisStore) Get(ctx context.Context, greenhouseID string) (Greenhouse, 
 	if len(fields) == 0 {
 		return Greenhouse{}, ErrNotFound
 	}
+	return decode(greenhouseID, fields)
+}
+
+// List devolve todas as estufas com estado, ordenadas por id. Usa SCAN, que
+// não bloqueia o Redis como KEYS; a cardinalidade é a de estufas, não de leituras.
+func (s *RedisStore) List(ctx context.Context) ([]Greenhouse, error) {
+	var keys []string
+	iter := s.client.Scan(ctx, 0, keyPrefix+"*", 500).Iterator()
+	for iter.Next(ctx) {
+		keys = append(keys, iter.Val())
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("listar estufas no redis: %w", err)
+	}
+	slices.Sort(keys)
+
+	pipe := s.client.Pipeline()
+	cmds := make([]*redis.MapStringStringCmd, len(keys))
+	for i, k := range keys {
+		cmds[i] = pipe.HGetAll(ctx, k)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, fmt.Errorf("ler estados no redis: %w", err)
+	}
+	out := make([]Greenhouse, 0, len(keys))
+	for i, k := range keys {
+		fields := cmds[i].Val()
+		if len(fields) == 0 { // expirou entre o SCAN e a leitura
+			continue
+		}
+		gh, err := decode(strings.TrimPrefix(k, keyPrefix), fields)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, gh)
+	}
+	return out, nil
+}
+
+func decode(greenhouseID string, fields map[string]string) (Greenhouse, error) {
 	out := Greenhouse{GreenhouseID: greenhouseID, Sensors: make(map[string]Sensor, len(fields))}
 	for sensorType, raw := range fields {
 		var v storedSensor

@@ -23,7 +23,11 @@ CREATE TABLE IF NOT EXISTS greenhouse_alerts (
     window_end     TIMESTAMPTZ      NOT NULL,
     rule           TEXT             NOT NULL,
     observed_value DOUBLE PRECISION NOT NULL,
-    limit_value    DOUBLE PRECISION NOT NULL
+    limit_value    DOUBLE PRECISION NOT NULL,
+    -- Preenchidas pela API de consulta; o sink JDBC não toca nestas colunas.
+    acknowledged_at TIMESTAMPTZ,
+    acknowledged_by TEXT,
+    note            TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_alerts_greenhouse ON greenhouse_alerts (greenhouse_id, window_start);

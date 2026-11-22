@@ -91,3 +91,7 @@ evidencia: ## Sobe tudo e grava a evidência em vídeo (Playwright, e2e/evidenci
 .PHONY: loadtest
 loadtest: ## Teste de carga contra o ambiente local (LOAD_RATE, LOAD_DURATION, LOAD_GREENHOUSES)
 	./scripts/load-test.sh $(LOAD_RATE) $(LOAD_DURATION) $(LOAD_GREENHOUSES)
+
+.PHONY: web-dev
+web-dev: ## Front-end Canteiro em modo dev (Vite, proxy /api para o agregador em :9102)
+	cd web && npm ci && npm run dev
