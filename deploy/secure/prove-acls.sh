@@ -44,16 +44,45 @@ denied() {
 }
 allowed() {
   local name="$1"; shift
-  if timeout 120 "$@" >/dev/null 2>&1; then echo "ok   permitido: $name"; else echo "FALHA $name"; fail=1; fi
+  local out rc
+  out="$(timeout 120 "$@" 2>&1)"; rc=$?
+  if [[ $rc -eq 0 ]] && grep -Eq "$ALLOWED_PATTERN" <<<"$out"; then
+    echo "ok   permitido: $name"
+  else
+    echo "FALHA $name (saída $rc; linhas relevantes abaixo)"
+    grep -Ei "exception|error|authoriz|handshake|authentication|skip getting" <<<"$out" | sed -E 's/(password|secret|jaas|keystore|truststore)[^ ]*/[redigido]/Ig' | head -8
+    fail=1
+  fi
+}
+# Variante do consumidor: o kafka-console-consumer sai com 0 mesmo quando o tópico
+# é negado (loga TopicAuthorizationException e segue). Aqui o critério é a exceção
+# de autorização no stderr E nenhum registro no stdout. Só para este caso.
+denied_consumer() {
+  local name="$1" pattern="$2"; shift 2
+  local out err rc
+  out="$(timeout 120 "$@" 2>"$W/err")"; rc=$?
+  err="$(cat "$W/err")"
+  if grep -Eq "$pattern" <<<"$err" && [[ -z "$(tr -d '[:space:]' <<<"$out")" ]]; then
+    echo "ok   negado: $name (exceção de autorização e nenhum registro lido; saída $rc)"
+  else
+    echo "FALHA $name (saída $rc, registros lidos: $(grep -c . <<<"$out"))"
+    grep -Ei "authoriz|exception|error" <<<"$err" | sed -E 's/(password|secret|jaas)[^ ]*/[redigido]/Ig' | head -5
+    fail=1
+  fi
 }
 
 # Controle positivo: com credenciais e certificado válidos o simulador autentica
-# e descreve o tópico que ele escreve; sem isto, uma negação abaixo poderia ser
-# só um erro de configuração do cliente.
-allowed "simulador descreve greenhouse.readings" \
-  kafka-topics --bootstrap-server "$B" --command-config "$W/ok.properties" --describe --topic greenhouse.readings
+# e lista os offsets do tópico que ele escreve; sem isto, uma negação abaixo poderia
+# ser só um erro de configuração do cliente. kafka-get-offsets (Kafka 3.9.0,
+# GetOffsetShell) só chama listTopics, describeTopics e listOffsets, ou seja, só
+# exige Describe no tópico, que é o que o simulador tem. O kafka-topics --describe
+# NÃO serve: chama também describeConfigs e describeCluster, que o simulador não
+# tem e não deve ter.
+ALLOWED_PATTERN='^greenhouse\.readings:[0-9]+:[0-9]+$'
+allowed "simulador lista os offsets de greenhouse.readings" \
+  kafka-get-offsets --bootstrap-server "$B" --command-config "$W/ok.properties" --topic greenhouse.readings --time -1
 
-denied "simulador lê greenhouse.alerts" 'Not authorized to access topics: \[greenhouse\.alerts\]' \
+denied_consumer "simulador lê greenhouse.alerts" 'Not authorized to access topics: \[greenhouse\.alerts\]' \
   kafka-console-consumer --bootstrap-server "$B" --consumer.config "$W/ok.properties" \
   --topic greenhouse.alerts --partition 0 --offset earliest --timeout-ms 20000
 
@@ -64,16 +93,18 @@ denied "simulador lê greenhouse.alerts" 'Not authorized to access topics: \[gre
 denied "simulador escreve em greenhouse.aggregator.checkpoints" 'Not authorized to access topics: \[greenhouse\.aggregator\.checkpoints\]' \
   bash -c "printf 'k:v\n' | kafka-console-producer --sync --bootstrap-server '$B' --producer.config '$W/ok.properties' --topic greenhouse.aggregator.checkpoints --property parse.key=true --property key.separator=:"
 
-denied "cliente sem certificado (mTLS)" 'SSL|handshake|authentication|Timed out|disconnected' \
-  kafka-topics --bootstrap-server "$B" --command-config "$W/nocert.properties" --list
+# Tem de falhar no handshake TLS (o broker exige certificado de cliente), não por
+# timeout: o padrão não aceita "Timed out".
+denied "cliente sem certificado (mTLS)" 'SSL handshake failed|SSLHandshakeException|bad_certificate|certificate_required' \
+  kafka-get-offsets --bootstrap-server "$B" --command-config "$W/nocert.properties" --topic greenhouse.readings --time -1
 
 denied "senha SASL errada" 'Authentication failed|SaslAuthenticationException' \
-  kafka-topics --bootstrap-server "$B" --command-config "$W/badpass.properties" --list
+  kafka-get-offsets --bootstrap-server "$B" --command-config "$W/badpass.properties" --topic greenhouse.readings --time -1
 
 # Repete o controle positivo depois das negações: prova que o broker seguia no ar
 # e que as credenciais continuavam válidas, então nenhuma negação acima foi só um
-# broker fora (um "Timed out" casaria com o padrão de "sem certificado").
-allowed "simulador ainda descreve greenhouse.readings (depois das negações)" \
-  kafka-topics --bootstrap-server "$B" --command-config "$W/ok.properties" --describe --topic greenhouse.readings
+# broker fora.
+allowed "simulador ainda lista os offsets de greenhouse.readings (depois das negações)" \
+  kafka-get-offsets --bootstrap-server "$B" --command-config "$W/ok.properties" --topic greenhouse.readings --time -1
 
 exit "$fail"

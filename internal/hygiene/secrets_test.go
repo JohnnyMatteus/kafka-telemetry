@@ -171,3 +171,26 @@ func TestDockerignoreKeepsSecretsOutOfTheBuildContext(t *testing.T) {
 		}
 	}
 }
+
+// Em listener SASL_SSL o broker ignora o ssl.client.auth global e trata como
+// "none" (ChannelBuilders, Kafka 3.9.0); sem a chave com prefixo de listener o
+// mTLS não existe. O CI provou isso: um cliente sem certificado entrou.
+func TestSecureBrokerRequiresClientCertsPerListener(t *testing.T) {
+	root, _ := repoFiles(t)
+	b, err := os.ReadFile(filepath.Join(root, "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(b)
+	for _, want := range []string{
+		"KAFKA_LISTENER_NAME_SASL__SSL_SSL_CLIENT_AUTH: required",
+		"KAFKA_LISTENER_NAME_CONTROLLER_SSL_CLIENT_AUTH: required",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("docker-compose.yml sem %q: o mTLS não valeria no listener", want)
+		}
+	}
+	if regexp.MustCompile(`(?m)^\s*KAFKA_SSL_CLIENT_AUTH:`).MatchString(text) {
+		t.Error("KAFKA_SSL_CLIENT_AUTH global é ignorado em SASL_SSL: use a chave com prefixo de listener")
+	}
+}

@@ -345,7 +345,13 @@ services:
       KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
       KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: PLAIN
       KAFKA_SASL_MECHANISM_CONTROLLER_PROTOCOL: PLAIN
-      KAFKA_SSL_CLIENT_AUTH: required
+      # mTLS: em listener SASL_SSL o broker IGNORA o ssl.client.auth global e o trata
+      # como "none" (ChannelBuilders, Kafka 3.9.0: "SSL client authentication is enabled
+      # in brokers for SASL_SSL only if listener-prefixed config is specified"). Só vale
+      # listener.name.<listener>.ssl.client.auth. A imagem converte "_" em "." e "__" em
+      # "_" (confluent-docker-utils, env_to_props), então SASL__SSL vira sasl_ssl.
+      KAFKA_LISTENER_NAME_SASL__SSL_SSL_CLIENT_AUTH: required
+      KAFKA_LISTENER_NAME_CONTROLLER_SSL_CLIENT_AUTH: required
       KAFKA_SSL_KEYSTORE_FILENAME: kafka-secure.keystore.p12
       KAFKA_SSL_KEYSTORE_CREDENTIALS: keystore_creds
       KAFKA_SSL_KEY_CREDENTIALS: key_creds
