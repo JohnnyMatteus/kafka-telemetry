@@ -43,7 +43,8 @@ func (p *replayPublisher) Publish(_ context.Context, m []aggregation.Message) er
 type fixedDecoder struct{}
 
 func (fixedDecoder) Decode(_ context.Context, _ []byte, v any) error {
-	v.(*contract.SensorReadingRecord).MeasuredAt = now
+	*v.(*contract.SensorReadingRecord) = contract.SensorReadingRecord{EventID: "e1", GreenhouseID: "gh-001", SensorID: "s1",
+		SensorType: "TEMPERATURE", Value: 22, MeasuredAt: now}
 	return nil
 }
 

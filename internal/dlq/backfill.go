@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,6 +44,7 @@ const (
 	notLate             = "not_late"
 	tooRecent           = "too_recent"
 	alreadyBackfilled   = "already_backfilled"
+	baseUnknown         = "base_unknown"
 )
 
 // WindowRef identifica uma janela.
@@ -52,8 +54,10 @@ type WindowRef struct {
 	Start        time.Time `json:"window_start"`
 }
 
+// key codifica a janela sem ambiguidade: cada campo é escapado (o "|" de um
+// greenhouse_id vira %7C), então o separador nunca aparece dentro de um campo.
 func (w WindowRef) key() string {
-	return w.GreenhouseID + "|" + w.SensorType + "|" + strconv.FormatInt(w.Start.UnixMilli(), 10)
+	return url.QueryEscape(w.GreenhouseID) + "|" + url.QueryEscape(w.SensorType) + "|" + strconv.FormatInt(w.Start.UnixMilli(), 10)
 }
 
 func parseRef(k string) (WindowRef, error) {
@@ -61,11 +65,13 @@ func parseRef(k string) (WindowRef, error) {
 	if len(parts) != 3 {
 		return WindowRef{}, fmt.Errorf("janela inválida %q", k)
 	}
-	ms, err := strconv.ParseInt(parts[2], 10, 64)
-	if err != nil {
-		return WindowRef{}, fmt.Errorf("janela inválida %q", k)
+	gh, err1 := url.QueryUnescape(parts[0])
+	typ, err2 := url.QueryUnescape(parts[1])
+	ms, err3 := strconv.ParseInt(parts[2], 10, 64)
+	if err := errors.Join(err1, err2, err3); err != nil {
+		return WindowRef{}, fmt.Errorf("janela inválida %q: %w", k, err)
 	}
-	return WindowRef{GreenhouseID: parts[0], SensorType: parts[1], Start: time.UnixMilli(ms).UTC()}, nil
+	return WindowRef{GreenhouseID: gh, SensorType: typ, Start: time.UnixMilli(ms).UTC()}, nil
 }
 
 // Base é o agregado já emitido da janela (Found falso: nenhuma leitura foi aceita).
@@ -141,8 +147,21 @@ type AggregateReader interface {
 	Window(ctx context.Context, greenhouseID, sensorType string, start time.Time) (Base, error)
 }
 
+// SinkProof diz se o sink que grava os agregados no Postgres já consumiu tudo
+// o que foi publicado. É a única prova de que "a janela não está no Postgres"
+// significa "ninguém a emitiu", e não "o sink ainda não a gravou".
+type SinkProof interface {
+	CaughtUp(ctx context.Context) (bool, error)
+}
+
+// ErrBaseUnknown indica que a janela não está no Postgres e não há prova de
+// que o sink passou por ela: somar só as leituras recuperadas e fazer upsert
+// apagaria o agregado original assim que o sink o gravasse.
+var ErrBaseUnknown = errors.New("base da janela desconhecida")
+
 // BackfillDeps reúne as portas do backfill.
 type BackfillDeps struct {
+	Sink SinkProof
 	// Ledger é o ledger do backfill (offsets da DLQ já recuperados e o cursor
 	// próprio), separado do de republicação.
 	Ledger         Ledger
@@ -154,7 +173,7 @@ type BackfillDeps struct {
 }
 
 func (d *BackfillDeps) validate() error {
-	if d.Ledger == nil || d.Windows == nil || d.Reader == nil || d.AggregateCodec == nil || d.AlertCodec == nil {
+	if d.Ledger == nil || d.Windows == nil || d.Reader == nil || d.Sink == nil || d.AggregateCodec == nil || d.AlertCodec == nil {
 		return errors.New("dlq: dependência do backfill ausente")
 	}
 	return nil
@@ -176,6 +195,26 @@ type BackfillResult struct {
 	// Republished conta as janelas pendentes de execuções anteriores que esta
 	// execução publicou.
 	Republished int `json:"republished_pending"`
+}
+
+// keepSelected remove de Selected as leituras das janelas bloqueadas.
+func keepSelected(sel []Item, blocked map[string]bool, byWindow map[string][]candidate) []Item {
+	if len(blocked) == 0 {
+		return sel
+	}
+	drop := map[int64]bool{}
+	for k := range blocked {
+		for _, c := range byWindow[k] {
+			drop[c.entry.Offset] = true
+		}
+	}
+	out := sel[:0]
+	for _, it := range sel {
+		if !drop[it.Offset] {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 type candidate struct {
@@ -222,15 +261,30 @@ func (r *Reprocessor) backfill(ctx context.Context, req Request, limit int, res 
 		return res, nil
 	}
 
+	caught := &sinkCheck{}
+	// blockWindow tira da seleção as leituras de uma janela sem base conhecida.
+	blocked := map[string]bool{}
+	blockWindow := func(k string, cs []candidate) {
+		blocked[k] = true
+		res.Skipped[baseUnknown] += len(cs)
+		for _, c := range cs {
+			res.Blocked = append(res.Blocked, Item{Offset: c.entry.Offset, Reason: c.entry.Headers[aggregation.HeaderReason], Action: baseUnknown})
+		}
+	}
 	if !req.Execute {
 		for _, k := range order {
 			cs := byWindow[k]
-			wr, err := r.previewWindow(ctx, cs)
+			wr, err := r.previewWindow(ctx, cs, caught)
+			if errors.Is(err, ErrBaseUnknown) {
+				blockWindow(k, cs)
+				continue
+			}
 			if err != nil {
 				return res, err
 			}
 			res.Backfill.Windows = append(res.Backfill.Windows, wr)
 		}
+		res.Selected = keepSelected(res.Selected, blocked, byWindow)
 		r.deps.Logger.Info("dlq: dry-run do backfill", "run", res.RunID, "operator", req.Operator, "selected", len(picked))
 		return res, nil
 	}
@@ -241,7 +295,11 @@ func (r *Reprocessor) backfill(ctx context.Context, req Request, limit int, res 
 	for _, k := range order {
 		cs := byWindow[k]
 		ref := cs[0].ref
-		base, err := r.baseFor(ctx, ref)
+		base, err := r.baseFor(ctx, ref, caught)
+		if errors.Is(err, ErrBaseUnknown) {
+			blockWindow(k, cs)
+			continue
+		}
 		if err != nil {
 			return res, err
 		}
@@ -264,6 +322,10 @@ func (r *Reprocessor) backfill(ctx context.Context, req Request, limit int, res 
 		}
 		res.Backfill.Windows = append(res.Backfill.Windows, wr)
 	}
+	res.Selected = keepSelected(res.Selected, blocked, byWindow)
+	if len(receipts) == 0 {
+		return res, nil
+	}
 	// As leituras já estão somadas de forma durável; o recibo da DLQ vem em
 	// seguida e a publicação do agregado por último. Se algo falhar daqui em
 	// diante, a janela fica marcada como pendente e a próxima execução a publica.
@@ -275,13 +337,17 @@ func (r *Reprocessor) backfill(ctx context.Context, req Request, limit int, res 
 	for i := range res.Selected {
 		res.Selected[i].Action = ActionBackfilled
 	}
-	res.Replayed = len(picked)
+	res.Replayed = len(receipts)
 	if err := ctx.Err(); err != nil {
 		return res, fmt.Errorf("prazo da execução esgotado antes de publicar (as janelas ficam pendentes): %w", err)
 	}
 	for _, k := range order {
+		st, ok := touched[k]
+		if !ok {
+			continue
+		}
 		ref := byWindow[k][0].ref
-		if err := r.publishWindow(ctx, ref, touched[k], req.Operator, res.RunID); err != nil {
+		if err := r.publishWindow(ctx, ref, st, req.Operator, res.RunID); err != nil {
 			return res, err
 		}
 	}
@@ -291,9 +357,10 @@ func (r *Reprocessor) backfill(ctx context.Context, req Request, limit int, res 
 }
 
 // baseFor devolve a fotografia já guardada da janela ou, na primeira vez, o
-// agregado emitido lido do Postgres. Se a janela não existe lá, só vale quando
-// já é velha o bastante para o sink ter entregado o original; pickLate garante.
-func (r *Reprocessor) baseFor(ctx context.Context, ref WindowRef) (Base, error) {
+// agregado emitido lido do Postgres. Se a janela não está lá, a ausência só
+// vale com prova de que o sink passou do que foi publicado (SinkProof); sem
+// ela falha fechado com ErrBaseUnknown, sem gravar estado.
+func (r *Reprocessor) baseFor(ctx context.Context, ref WindowRef, caught *sinkCheck) (Base, error) {
 	bf := r.deps.Backfill
 	if st, ok, err := bf.Windows.State(ctx, ref); err != nil {
 		return Base{}, fmt.Errorf("estado da janela: %w", err)
@@ -304,12 +371,40 @@ func (r *Reprocessor) baseFor(ctx context.Context, ref WindowRef) (Base, error) 
 	if err != nil {
 		return Base{}, fmt.Errorf("ler o agregado emitido: %w", err)
 	}
+	if b.Found {
+		return b, nil
+	}
+	ok, err := caught.get(ctx, bf.Sink)
+	if err != nil {
+		return Base{}, fmt.Errorf("prova do sink: %w", err)
+	}
+	if !ok {
+		return Base{}, ErrBaseUnknown
+	}
 	return b, nil
 }
 
-func (r *Reprocessor) previewWindow(ctx context.Context, cs []candidate) (WindowResult, error) {
+// sinkCheck consulta o sink uma vez por execução.
+type sinkCheck struct {
+	done bool
+	ok   bool
+}
+
+func (c *sinkCheck) get(ctx context.Context, p SinkProof) (bool, error) {
+	if c.done {
+		return c.ok, nil
+	}
+	ok, err := p.CaughtUp(ctx)
+	if err != nil {
+		return false, err
+	}
+	c.done, c.ok = true, ok
+	return ok, nil
+}
+
+func (r *Reprocessor) previewWindow(ctx context.Context, cs []candidate, caught *sinkCheck) (WindowResult, error) {
 	ref := cs[0].ref
-	base, err := r.baseFor(ctx, ref)
+	base, err := r.baseFor(ctx, ref, caught)
 	if err != nil {
 		return WindowResult{}, err
 	}
@@ -440,13 +535,16 @@ func (r *Reprocessor) pickLate(ctx context.Context, cursor int64, limit int, req
 			case req.Reason != "" && e.Headers[aggregation.HeaderReason] != req.Reason:
 				res.Skipped[filteredOut]++
 				continue
+			case len(e.Value) == 0:
+				res.Skipped[emptyValue]++
+				continue
 			}
 			verdict, rec, err := r.inspect(ctx, e, marks)
 			if err != nil {
 				return nil, nil, nil, err
 			}
 			switch verdict {
-			case ActionUndecodable:
+			case ActionUndecodable, ActionInvalid:
 				res.Skipped[verdict]++
 				res.Blocked = append(res.Blocked, Item{Offset: e.Offset, Reason: e.Headers[aggregation.HeaderReason], Action: verdict})
 			case ActionWouldReplay:
@@ -574,7 +672,9 @@ func (s *RedisWindowStore) Dirty(ctx context.Context, limit int) ([]DirtyWindow,
 	for _, m := range members {
 		ref, err := parseRef(m)
 		if err != nil {
-			return nil, err
+			// Uma marca ilegível não pode travar todo backfill: sai da fila.
+			_ = s.client.SRem(ctx, dirtyKey, m).Err()
+			continue
 		}
 		st, ok, err := s.State(ctx, ref)
 		if err != nil {

@@ -45,11 +45,15 @@ const (
 	ActionReplayed    = "replayed"
 	ActionWouldBeLate = "would_be_late"
 	ActionUndecodable = "undecodable"
-	foreignSource     = "foreign_source"
-	alreadyReplayed   = "already_replayed"
-	filteredOut       = "filtered"
-	emptyValue        = "empty_value"
-	scanLimitReached  = "scan_limit"
+	// ActionInvalid marca a leitura que o domínio recusa (valor impossível,
+	// relógio adiantado, campo vazio): voltaria à DLQ, e somá-la ao histórico
+	// ou disparar alerta com ela seria corromper dado.
+	ActionInvalid    = "invalid_reading"
+	foreignSource    = "foreign_source"
+	alreadyReplayed  = "already_replayed"
+	filteredOut      = "filtered"
+	emptyValue       = "empty_value"
+	scanLimitReached = "scan_limit"
 )
 
 const (
@@ -78,10 +82,13 @@ var (
 
 // Entry é uma mensagem da DLQ.
 type Entry struct {
-	Offset  int64
-	Key     []byte
-	Value   []byte
-	Headers map[string]string
+	Offset int64
+	// Timestamp é o instante em que a mensagem entrou na DLQ, logo o da
+	// recepção original: a validação da leitura usa este, não o de agora.
+	Timestamp time.Time
+	Key       []byte
+	Value     []byte
+	Headers   map[string]string
 }
 
 // Source lê a DLQ em ordem a partir de um offset. end é o próximo offset a
@@ -180,7 +187,8 @@ type Result struct {
 	Scanned  int    `json:"scanned"`
 	Selected []Item `json:"selected"`
 	// Blocked são as mensagens que não seriam recuperadas: would_be_late
-	// (o agregador as descartaria) ou undecodable (continuam recusadas).
+	// (o agregador as descartaria), undecodable e invalid_reading (continuam
+	// recusadas) e, no backfill, base_unknown.
 	Blocked  []Item         `json:"blocked"`
 	Replayed int            `json:"replayed"`
 	Skipped  map[string]int `json:"skipped"`
@@ -421,6 +429,14 @@ func (r *Reprocessor) inspect(ctx context.Context, e Entry, marks map[aggregatio
 			return ActionUndecodable, rec, nil
 		}
 		return "", rec, fmt.Errorf("decodificar o offset %d: %w", e.Offset, err)
+	}
+	// A mesma validação do agregador, com o instante de recepção original.
+	received := e.Timestamp
+	if received.IsZero() {
+		received = r.deps.Clock()
+	}
+	if err := rec.Reading().Validate(received); err != nil {
+		return ActionInvalid, rec, nil
 	}
 	part, err := strconv.ParseInt(e.Headers[aggregation.HeaderSourcePartition], 10, 32)
 	if err != nil {

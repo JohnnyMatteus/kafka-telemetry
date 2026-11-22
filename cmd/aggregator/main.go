@@ -40,6 +40,7 @@ type settings struct {
 	window         telemetry.WindowConfig
 	thresholds     telemetry.Thresholds
 	dlqReplay      dlq.Config
+	sinkGroup      string
 	operators      *api.OperatorAuth
 }
 
@@ -84,6 +85,7 @@ func load() (settings, error) {
 	}
 	s.thresholds = env.Thresholds()
 	s.dlqReplay = dlq.ConfigFromEnv(&env)
+	s.sinkGroup = env.String("DLQ_BACKFILL_SINK_GROUP", kafka.DefaultSinkGroup)
 	if err := env.Err(); err != nil {
 		return s, err
 	}
@@ -176,6 +178,7 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 		}
 		if pg != nil {
 			deps.Backfill = &dlq.BackfillDeps{
+				Sink:   kafka.NewSinkProof(inspector, s.sinkGroup),
 				Ledger: dlq.NewRedisBackfillLedger(rdb), Windows: dlq.NewRedisWindowStore(rdb), Reader: pg.Aggregates(),
 				AggregateCodec: aggEnc, AlertCodec: alertEnc, Thresholds: s.thresholds,
 			}

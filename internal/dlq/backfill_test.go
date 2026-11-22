@@ -66,7 +66,13 @@ type backfillFixture struct {
 	src      *fakeSource
 	obs      *outcomes
 	failNext *error
+	sink     *fakeSink
 }
+
+// fakeSink diz se o sink JDBC já consumiu tudo o que foi publicado.
+type fakeSink struct{ ok bool }
+
+func (s *fakeSink) CaughtUp(context.Context) (bool, error) { return s.ok, nil }
 
 type switchPublisher struct {
 	inner *fakePublisher
@@ -114,18 +120,19 @@ func newBackfillFixture(t *testing.T, dlqEntries func(t *testing.T, reg registry
 	t.Cleanup(func() { _ = rdb.Close() })
 	bf := &fakePublisher{}
 	var failNext error
+	sink := &fakeSink{ok: true}
 	src := &fakeSource{entries: dlqEntries(t, reg)}
 	store := dlq.NewRedisWindowStore(rdb)
 	deps := dlq.Deps{Source: src, Publisher: switchPublisher{inner: bf, err: &failNext}, Ledger: dlq.NewRedisLedger(rdb),
 		Decoder: contract.NewDecoder(reg), Checkpoints: cps, Clock: func() time.Time { return t0.Add(10 * time.Minute) },
-		Backfill: &dlq.BackfillDeps{Ledger: dlq.NewRedisBackfillLedger(rdb), Windows: store,
+		Backfill: &dlq.BackfillDeps{Sink: sink, Ledger: dlq.NewRedisBackfillLedger(rdb), Windows: store,
 			Reader: aggregatesFromTopic{t: t, reg: reg, pub: live, size: time.Minute}, AggregateCodec: aggEnc, AlertCodec: alertEnc,
 			Thresholds: telemetry.DefaultThresholds()}}
 	r, err := dlq.New(dlq.Config{Destination: readings, DLQTopic: deadQ, MaxBatch: 10, WindowSize: time.Minute}, deps)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return backfillFixture{r: r, svc: svc, live: live, bf: bf, store: store, deps: deps, reg: reg, src: src, obs: obs, failNext: &failNext}
+	return backfillFixture{r: r, svc: svc, live: live, bf: bf, store: store, deps: deps, reg: reg, src: src, obs: obs, failNext: &failNext, sink: sink}
 }
 
 func lateEntries(t *testing.T, reg registry) []dlq.Entry {
@@ -274,5 +281,105 @@ func TestBackfillGuardrails(t *testing.T) {
 	plain := newFixture(t, nil, nil)
 	if _, err := plain.r.Run(ctx, dlq.Request{Backfill: true}); !errors.Is(err, dlq.ErrBackfillUnavailable) {
 		t.Fatalf("sem backfill: %v", err)
+	}
+}
+
+// Leitura que o domínio recusa (e que o agregador mandou para a DLQ por isso)
+// não entra no histórico nem dispara alerta, em nenhum dos dois modos.
+func TestRecoveryNeverSumsOrReplaysAnInvalidReading(t *testing.T) {
+	entries := func(t *testing.T, reg registry) []dlq.Entry {
+		skew := entryWith(1, "invalid_reading", readings, encodeReading(t, reg, "skew", 25, t0.Add(3*time.Hour))) // relógio adiantado
+		empty := entryWith(2, "malformed", readings, nil)
+		return []dlq.Entry{
+			entryWith(0, "invalid_reading", readings, encodeReading(t, reg, "hot", 500, t0.Add(30*time.Second))), // fora da faixa física
+			skew, empty,
+			entryWith(3, "malformed", readings, []byte("lixo")),
+		}
+	}
+	f := newBackfillFixture(t, entries)
+	ctx := context.Background()
+
+	bf, err := f.r.Run(ctx, dlq.Request{Operator: "ana", Backfill: true, Execute: true})
+	if err != nil || bf.Replayed != 0 || len(f.bf.sent) != 0 {
+		t.Fatalf("backfill somou leitura inválida: res=%+v err=%v enviadas=%d", bf, err, len(f.bf.sent))
+	}
+	if bf.Skipped["invalid_reading"] != 2 || bf.Skipped["undecodable"] != 1 || bf.Skipped["empty_value"] != 1 {
+		t.Fatalf("skipped = %v", bf.Skipped)
+	}
+	rep, err := f.r.Run(ctx, dlq.Request{Operator: "ana", Execute: true})
+	if err != nil || rep.Replayed != 0 || len(f.bf.sent) != 0 {
+		t.Fatalf("a republicação prometeu recuperar o que voltaria à DLQ: res=%+v err=%v", rep, err)
+	}
+	var invalid int
+	for _, b := range rep.Blocked {
+		if b.Action == dlq.ActionInvalid {
+			invalid++
+		}
+	}
+	if invalid != 2 {
+		t.Fatalf("blocked = %+v", rep.Blocked)
+	}
+}
+
+// O sink atrasado ou fora: a ausência da janela no Postgres não prova que ela
+// não existe. Sem prova, falha fechado e não grava estado.
+func TestBackfillFailsClosedWhenTheBaseIsMissingAndTheSinkIsBehind(t *testing.T) {
+	entries := func(t *testing.T, reg registry) []dlq.Entry {
+		// Janela 12:03: o agregador emitiu o original, mas o leitor (Postgres) ainda não o tem.
+		return []dlq.Entry{entryWith(0, "unknown_schema", readings, encodeReading(t, reg, "late-x", 30, t0.Add(3*time.Minute+5*time.Second)))}
+	}
+	f := newBackfillFixture(t, entries)
+	ctx := context.Background()
+	// O leitor não encontra nada (sink atrasado) e o sink não alcançou o tópico.
+	f.deps.Backfill.Reader = noRow{}
+	f.sink.ok = false
+	r, err := dlq.New(dlq.Config{Destination: readings, DLQTopic: deadQ, MaxBatch: 10, WindowSize: time.Minute}, f.deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := r.Run(ctx, dlq.Request{Operator: "ana", Backfill: true, Execute: true})
+	if err != nil || res.Replayed != 0 || len(f.bf.sent) != 0 || res.Skipped["base_unknown"] != 1 || len(res.Selected) != 0 {
+		t.Fatalf("res=%+v err=%v enviadas=%d", res, err, len(f.bf.sent))
+	}
+	ref := dlq.WindowRef{GreenhouseID: "gh-001", SensorType: "TEMPERATURE", Start: t0.Add(3 * time.Minute)}
+	if _, ok, _ := f.store.State(ctx, ref); ok {
+		t.Fatal("fotografou uma base ausente sem prova")
+	}
+	dry, _ := r.Run(ctx, dlq.Request{Operator: "ana", Backfill: true})
+	if len(dry.Backfill.Windows) != 0 || len(dry.Blocked) != 1 || dry.Blocked[0].Action != "base_unknown" {
+		t.Fatalf("dry-run = %+v", dry)
+	}
+	// O sink alcança o tópico e ainda não há linha: agora a ausência é prova.
+	f.sink.ok = true
+	res, err = r.Run(ctx, dlq.Request{Operator: "ana", Backfill: true, Execute: true})
+	if err != nil || res.Replayed != 1 || len(aggregatesOf(t, f.reg, f.bf.sent)) != 1 {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
+
+type noRow struct{}
+
+func (noRow) Window(context.Context, string, string, time.Time) (dlq.Base, error) {
+	return dlq.Base{}, nil
+}
+
+// Um greenhouse_id com o separador não pode quebrar a chave nem travar a fila de pendentes.
+func TestWindowKeyIsUnambiguousAndAPoisonedPendingMarkIsHarmless(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+	store := dlq.NewRedisWindowStore(rdb)
+	ctx := context.Background()
+	ref := dlq.WindowRef{GreenhouseID: "gh|1|2", SensorType: "TEMPERATURE", Start: t0}
+	if _, added, err := store.Apply(ctx, ref, dlq.Base{}, []dlq.ReadingDelta{{EventID: "e1", Value: 20}}); err != nil || added != 1 {
+		t.Fatalf("added=%d err=%v", added, err)
+	}
+	rdb.SAdd(ctx, "dlq:backfill:dirty", "lixo-sem-separador")
+	dirty, err := store.Dirty(ctx, 10)
+	if err != nil || len(dirty) != 1 || dirty[0].Ref != ref {
+		t.Fatalf("dirty=%+v err=%v", dirty, err)
+	}
+	if n, _ := rdb.SCard(ctx, "dlq:backfill:dirty").Result(); n != 1 {
+		t.Fatalf("a marca ilegível devia ter saído da fila: %d", n)
 	}
 }

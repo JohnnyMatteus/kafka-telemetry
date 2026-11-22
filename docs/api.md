@@ -105,7 +105,7 @@ Reprocessa a DLQ: republica no tópico de leituras o que o agregador recusou, de
 
 ### Backfill de janelas fechadas
 
-`{"backfill":true,"limit":10,"dry_run":true}` recupera as leituras cuja janela já fechou: soma-as ao agregado já emitido da janela (lido do Postgres), republica o agregado recalculado em `greenhouse.aggregates` (o sink faz upsert) e reavalia o alerta. Idempotente por `event_id`; as mesmas regras de dry-run, lote, operador e prazo valem. Só janelas com fim há mais de `DLQ_BACKFILL_MIN_AGE` (5 min) entram; as mais novas ficam em `skipped.too_recent`. Leituras de janela ainda aberta ficam em `skipped.not_late` (use a republicação normal). A resposta traz `backfill.windows`, com `base_count`, `new_events`, `result_count`, `result_mean` e o `alert` que o novo agregado geraria. `501` se o backfill não está ligado (exige `POSTGRES_DSN`). Decisão no [ADR 0015](adr/0015-backfill-de-janelas-fechadas.md).
+`{"backfill":true,"limit":10,"dry_run":true}` recupera as leituras cuja janela já fechou: soma-as ao agregado já emitido da janela (lido do Postgres), republica o agregado recalculado em `greenhouse.aggregates` (o sink faz upsert) e reavalia o alerta. Idempotente por `event_id`; as mesmas regras de dry-run, lote, operador e prazo valem. Só janelas com fim há mais de `DLQ_BACKFILL_MIN_AGE` (5 min) entram; as mais novas ficam em `skipped.too_recent`. `invalid_reading` (valor impossível, relógio adiantado, campo vazio, validado com o instante de recepção original), `undecodable` e `base_unknown` (a janela não está no Postgres e não há prova de que o sink do conector passou do tópico) ficam em `blocked` e nunca são somadas. Leituras de janela ainda aberta ficam em `skipped.not_late` (use a republicação normal). A resposta traz `backfill.windows`, com `base_count`, `new_events`, `result_count`, `result_mean` e o `alert` que o novo agregado geraria. `501` se o backfill não está ligado (exige `POSTGRES_DSN`). Decisão no [ADR 0015](adr/0015-backfill-de-janelas-fechadas.md).
 
 ```json
 {"run_id":"3b1f...","dry_run":true,"backfill":{"windows":[{"greenhouse_id":"gh-001","sensor_type":"TEMPERATURE",
@@ -125,6 +125,7 @@ A execução inteira tem um prazo de 60 s, menor que o TTL do lock (2 min, sem r
 | `KAFKA_BROKERS` | DLQ e saúde do pipeline |
 | `DLQ_REPLAY_TOPIC` | destino do reprocessamento (padrão `greenhouse.readings`) |
 | `WINDOW_SIZE` | tamanho da janela, usado pelo reprocessador para saber se a janela de uma leitura já fechou |
+| `DLQ_BACKFILL_SINK_GROUP` | grupo do conector JDBC de agregados, usado como prova de que o sink alcançou o tópico (padrão `connect-greenhouse-aggregates-jdbc-sink`) |
 | `DLQ_BACKFILL_MIN_AGE` | idade mínima do fim da janela para o backfill (padrão 5m) |
 | `DLQ_REPLAY_MAX_BATCH` | teto de mensagens por execução (padrão 100, máximo 1000) |
 | `THRESHOLD_*` | faixas agronômicas |

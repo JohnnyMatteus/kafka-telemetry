@@ -101,6 +101,7 @@ func replay(ctx context.Context, brokers []string, registryURL string, env *conf
 	}
 	redisAddr := env.String("REDIS_ADDR", "")
 	postgresDSN := env.String("POSTGRES_DSN", "")
+	sinkGroup := env.String("DLQ_BACKFILL_SINK_GROUP", kafka.DefaultSinkGroup)
 	thresholds := env.Thresholds()
 	cfg := dlq.ConfigFromEnv(env)
 	if err := env.Err(); err != nil {
@@ -143,7 +144,7 @@ func replay(ctx context.Context, brokers []string, registryURL string, env *conf
 		if err != nil {
 			return err
 		}
-		deps.Backfill = &dlq.BackfillDeps{Ledger: dlq.NewRedisBackfillLedger(rdb), Windows: dlq.NewRedisWindowStore(rdb),
+		deps.Backfill = &dlq.BackfillDeps{Sink: kafka.NewSinkProof(inspector, sinkGroup), Ledger: dlq.NewRedisBackfillLedger(rdb), Windows: dlq.NewRedisWindowStore(rdb),
 			Reader: pg.Aggregates(), AggregateCodec: aggEnc, AlertCodec: alertEnc, Thresholds: thresholds}
 	}
 	r, err := dlq.New(cfg, deps)
