@@ -108,7 +108,7 @@ func (m *memCheckpoints) Load(context.Context) (map[aggregation.TopicPartition]a
 }
 
 func entryWith(offset int64, reason, source string, value []byte) dlq.Entry {
-	return dlq.Entry{Offset: offset, Key: []byte("gh-001"), Value: value,
+	return dlq.Entry{Offset: offset, Timestamp: t0.Add(10 * time.Minute), Key: []byte("gh-001"), Value: value,
 		Headers: map[string]string{aggregation.HeaderReason: reason, aggregation.HeaderSourceTopic: source, aggregation.HeaderSourcePartition: "0"}}
 }
 

@@ -40,6 +40,7 @@ type settings struct {
 	window         telemetry.WindowConfig
 	thresholds     telemetry.Thresholds
 	dlqReplay      dlq.Config
+	sinkGroup      string
 	operators      *api.OperatorAuth
 }
 
@@ -84,6 +85,7 @@ func load() (settings, error) {
 	}
 	s.thresholds = env.Thresholds()
 	s.dlqReplay = dlq.ConfigFromEnv(&env)
+	s.sinkGroup = env.String("DLQ_BACKFILL_SINK_GROUP", kafka.DefaultSinkGroup)
 	if err := env.Err(); err != nil {
 		return s, err
 	}
@@ -112,11 +114,11 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	aggEnc, err := encoderFor(ctx, registry, schemas.TopicAggregates)
+	aggEnc, err := registry.EncoderFor(ctx, schemas.TopicAggregates)
 	if err != nil {
 		return err
 	}
-	alertEnc, err := encoderFor(ctx, registry, schemas.TopicAlerts)
+	alertEnc, err := registry.EncoderFor(ctx, schemas.TopicAlerts)
 	if err != nil {
 		return err
 	}
@@ -149,30 +151,43 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 	defer inspector.Close()
 	apiDeps.DLQ, apiDeps.Health = inspector, inspector
 	var stateStore aggregation.StateStore
+	var rdb *redis.Client
 	if s.redisAddr != "" {
-		rdb := redis.NewClient(&redis.Options{Addr: s.redisAddr})
+		rdb = redis.NewClient(&redis.Options{Addr: s.redisAddr})
 		defer func() { _ = rdb.Close() }()
 		store := state.NewRedisStore(rdb)
 		stateStore = state.NewInstrumented(store, reg)
 		apiDeps.State = store
-		// O ledger da DLQ mora no Redis; sem ele não há reprocessamento.
-		replay, err := dlq.New(s.dlqReplay, dlq.Deps{
-			Source: inspector, Publisher: kafka.NewPublisher(consumer.Client()),
-			Ledger: dlq.NewRedisLedger(rdb), Decoder: contract.NewDecoder(registry),
-			Checkpoints: kafka.NewCheckpointStore(consumer.Client(), s.brokers, schemas.TopicCheckpoints), Logger: logger,
-		})
-		if err != nil {
-			return err
-		}
-		apiDeps.Replay = replay
 	}
+	var pg *postgres.Store
 	if s.postgresDSN != "" {
-		pg, err := postgres.Open(ctx, s.postgresDSN)
+		pg, err = postgres.Open(ctx, s.postgresDSN)
 		if err != nil {
 			return err
 		}
 		defer pg.Close()
 		apiDeps.Series, apiDeps.Alerts = pg.Series(), pg.Alerts()
+	}
+	// O ledger da DLQ mora no Redis; sem ele não há reprocessamento. O
+	// backfill de janelas fechadas também precisa do Postgres (agregado emitido).
+	if rdb != nil {
+		deps := dlq.Deps{
+			Source: inspector, Publisher: kafka.NewPublisher(consumer.Client()),
+			Ledger: dlq.NewRedisLedger(rdb), Decoder: contract.NewDecoder(registry),
+			Checkpoints: kafka.NewCheckpointStore(consumer.Client(), s.brokers, schemas.TopicCheckpoints), Logger: logger,
+		}
+		if pg != nil {
+			deps.Backfill = &dlq.BackfillDeps{
+				Sink:   kafka.NewSinkProof(inspector, s.sinkGroup),
+				Ledger: dlq.NewRedisBackfillLedger(rdb), Windows: dlq.NewRedisWindowStore(rdb), Reader: pg.Aggregates(),
+				AggregateCodec: aggEnc, AlertCodec: alertEnc, Thresholds: s.thresholds,
+			}
+		}
+		replay, err := dlq.New(s.dlqReplay, deps)
+		if err != nil {
+			return err
+		}
+		apiDeps.Replay = replay
 	}
 	routes := api.Routes(apiDeps)
 
@@ -202,22 +217,6 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 		return consumer.Run(gctx, svc, metrics)
 	})
 	return g.Wait()
-}
-
-func encoderFor(ctx context.Context, registry *kafka.Registry, topic string) (*contract.Encoder, error) {
-	sub, err := schemas.Lookup(topic)
-	if err != nil {
-		return nil, err
-	}
-	text, err := sub.Latest()
-	if err != nil {
-		return nil, err
-	}
-	id, err := registry.Lookup(ctx, sub.Name, text)
-	if err != nil {
-		return nil, err
-	}
-	return contract.NewEncoder(id, text)
 }
 
 // tickInterval acorda o laço de consumo para fechar janelas ociosas; sem

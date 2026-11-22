@@ -111,3 +111,22 @@ func TestSeriesGroupsByTypeInRange(t *testing.T) {
 		t.Fatalf("série = %+v (intervalo é [from, to))", s)
 	}
 }
+
+// O backfill da DLQ parte do agregado que o sink JDBC gravou.
+func TestAggregatesWindowReadsTheEmittedAggregate(t *testing.T) {
+	store := start(t)
+	ctx := context.Background()
+	if err := store.Exec(ctx, `INSERT INTO greenhouse_window_aggregates
+		(greenhouse_id, sensor_type, window_start, window_end, sample_count, min_value, max_value, mean_value, unit)
+		VALUES ('gh-001','TEMPERATURE',$1,$2,4,18,26,22,'celsius')`, t0, t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Aggregates().Window(ctx, "gh-001", "TEMPERATURE", t0)
+	if err != nil || !got.Found || got.Count != 4 || got.Sum != 88 || got.Min != 18 || got.Max != 26 {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	missing, err := store.Aggregates().Window(ctx, "gh-001", "TEMPERATURE", t0.Add(time.Hour))
+	if err != nil || missing.Found {
+		t.Fatalf("missing=%+v err=%v", missing, err)
+	}
+}

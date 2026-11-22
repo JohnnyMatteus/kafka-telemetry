@@ -26,10 +26,21 @@ return 0
 
 // RedisLedger implementa Ledger no Redis: um hash offset -> recibo, o cursor
 // e o lock da execução.
-type RedisLedger struct{ client redis.UniversalClient }
+type RedisLedger struct {
+	client           redis.UniversalClient
+	keyDone, keyCurs string
+}
 
 // NewRedisLedger usa um cliente já configurado.
-func NewRedisLedger(client redis.UniversalClient) *RedisLedger { return &RedisLedger{client: client} }
+func NewRedisLedger(client redis.UniversalClient) *RedisLedger {
+	return &RedisLedger{client: client, keyDone: keyDone, keyCurs: keyCursor}
+}
+
+// NewRedisBackfillLedger é o ledger do backfill: recibos e cursor próprios,
+// mas o mesmo lock, para republicação e backfill nunca rodarem juntos.
+func NewRedisBackfillLedger(client redis.UniversalClient) *RedisLedger {
+	return &RedisLedger{client: client, keyDone: "dlq:backfill:done", keyCurs: "dlq:backfill:cursor"}
+}
 
 func (l *RedisLedger) Lock(ctx context.Context, runID string, ttl time.Duration) (func(), error) {
 	ok, err := l.client.SetNX(ctx, keyLock, runID, ttl).Result()
@@ -53,7 +64,7 @@ func (l *RedisLedger) Done(ctx context.Context, offsets []int64) (map[int64]Rece
 	for i, o := range offsets {
 		fields[i] = strconv.FormatInt(o, 10)
 	}
-	vals, err := l.client.HMGet(ctx, keyDone, fields...).Result()
+	vals, err := l.client.HMGet(ctx, l.keyDone, fields...).Result()
 	if err != nil {
 		return nil, err
 	}
@@ -83,11 +94,11 @@ func (l *RedisLedger) Record(ctx context.Context, receipts map[int64]Receipt) er
 		}
 		values[strconv.FormatInt(o, 10)] = string(b)
 	}
-	return l.client.HSet(ctx, keyDone, values).Err()
+	return l.client.HSet(ctx, l.keyDone, values).Err()
 }
 
 func (l *RedisLedger) Cursor(ctx context.Context) (int64, error) {
-	n, err := l.client.Get(ctx, keyCursor).Int64()
+	n, err := l.client.Get(ctx, l.keyCurs).Int64()
 	if errors.Is(err, redis.Nil) {
 		return 0, nil
 	}
@@ -95,5 +106,5 @@ func (l *RedisLedger) Cursor(ctx context.Context) (int64, error) {
 }
 
 func (l *RedisLedger) SetCursor(ctx context.Context, offset int64) error {
-	return l.client.Set(ctx, keyCursor, offset, 0).Err()
+	return l.client.Set(ctx, l.keyCurs, offset, 0).Err()
 }

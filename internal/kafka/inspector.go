@@ -207,8 +207,57 @@ func (i *Inspector) Read(ctx context.Context, from int64, limit int) ([]dlq.Entr
 			for _, hd := range r.Headers {
 				h[hd.Key] = string(hd.Value)
 			}
-			out = append(out, dlq.Entry{Offset: r.Offset, Key: r.Key, Value: r.Value, Headers: h})
+			out = append(out, dlq.Entry{Offset: r.Offset, Timestamp: r.Timestamp.UTC(), Key: r.Key, Value: r.Value, Headers: h})
 		})
 	}
 	return out, end, nil
+}
+
+// DefaultSinkGroup é o grupo do conector JDBC que grava os agregados
+// (connect-<nome do conector>).
+const DefaultSinkGroup = "connect-greenhouse-aggregates-jdbc-sink"
+
+// SinkProof implementa dlq.SinkProof: o sink "passou" quando o grupo dele
+// commitou, em toda partição do tópico de agregados, tudo o que foi escrito.
+type SinkProof struct {
+	inspector *Inspector
+	group     string
+}
+
+// NewSinkProof usa o cliente de administração do Inspector.
+func NewSinkProof(in *Inspector, group string) *SinkProof {
+	return &SinkProof{inspector: in, group: group}
+}
+
+// CaughtUp devolve false (sem erro) se o grupo não existe ou não commitou
+// alguma partição: sem prova, quem chama deve falhar fechado.
+func (s *SinkProof) CaughtUp(ctx context.Context) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
+	ends, err := s.inspector.admin.ListEndOffsets(ctx, schemas.TopicAggregates)
+	if err != nil {
+		return false, fmt.Errorf("offsets finais de %s: %w", schemas.TopicAggregates, err)
+	}
+	if err := ends.Error(); err != nil {
+		return false, err
+	}
+	lags, err := s.inspector.admin.Lag(ctx, s.group)
+	if err != nil {
+		return false, fmt.Errorf("lag do grupo %s: %w", s.group, err)
+	}
+	gl, ok := lags[s.group]
+	if !ok || gl.Error() != nil {
+		return false, nil
+	}
+	caught := true
+	ends.Each(func(o kadm.ListedOffset) {
+		if o.Offset == 0 {
+			return
+		}
+		l, found := gl.Lag.Lookup(o.Topic, o.Partition)
+		if !found || l.Err != nil || l.Commit.At < o.Offset {
+			caught = false
+		}
+	})
+	return caught, nil
 }

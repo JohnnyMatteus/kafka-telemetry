@@ -49,6 +49,12 @@ Só entra aqui o que o código tem de fato. Cada item aponta o trecho, o problem
 - **Problema**: republicar uma mensagem da DLQ duas vezes, ou duas execuções ao mesmo tempo, duplicaria leituras. O ledger registra cada offset republicado, o lock (`SET NX` com TTL e liberação por comparação) serializa as execuções.
 - **Trade-off**: entre o publish e o ledger há uma janela em que um crash causa republicação; o deduplicador do agregador a absorve dentro do watermark. O lock não é renovado, então a execução inteira roda num contexto de 60 s, menor que o TTL.
 
+### Backfill idempotente com fotografia (reprocessador da DLQ)
+
+- **Onde**: [dlq/backfill.go](../../internal/dlq/backfill.go) e o [ADR 0015](../adr/0015-backfill-de-janelas-fechadas.md). O estado de cada janela (fotografia do agregado emitido + acumulado + conjunto de `event_id`) é atualizado por um script atômico no Redis; o agregado publicado é sempre derivado da fotografia.
+- **Problema**: recalcular uma janela fechada sem somar duas vezes a mesma leitura, mesmo com falha entre somar e publicar.
+- **Trade-off**: o estado vive no Redis; perdê-lo faz o próximo backfill partir do Postgres, que já tem o resultado anterior.
+
 ### Estratégia por canal e idempotência de entrega (notificador)
 
 - **Onde**: a porta [notify.Channel](../../internal/notify/notify.go) com os adaptadores [EmailChannel](../../internal/notify/email.go) e [WebhookChannel](../../internal/notify/webhook.go); [notify.Service](../../internal/notify/notify.go) escolhe os canais de cada produtor; [RedisSent](../../internal/notify/redis.go) lembra o que já saiu. Decisão no [ADR 0013](../adr/0013-notificador-de-alertas.md).

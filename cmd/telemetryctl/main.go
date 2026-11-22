@@ -28,6 +28,7 @@ import (
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/contract"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/dlq"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/kafka"
+	"github.com/JohnnyMatteus/kafka-telemetry/internal/postgres"
 	"github.com/JohnnyMatteus/kafka-telemetry/schemas"
 )
 
@@ -36,10 +37,11 @@ const usage = `uso:
   telemetryctl topics [-partitions N] [-replication N] [-min-isr N]
   telemetryctl schemas check
   telemetryctl schemas register
-  telemetryctl dlq replay [-limit N] [-reason R] [-execute -operator NOME]
+  telemetryctl dlq replay [-limit N] [-reason R] [-backfill] [-execute -operator NOME]
 
 variáveis: KAFKA_BROKERS (localhost:9092), SCHEMA_REGISTRY_URL (http://localhost:8081),
-           REDIS_ADDR, DLQ_REPLAY_TOPIC, DLQ_REPLAY_MAX_BATCH, WINDOW_SIZE (só para dlq replay)`
+           REDIS_ADDR, POSTGRES_DSN (backfill), DLQ_REPLAY_TOPIC, DLQ_REPLAY_MAX_BATCH,
+           DLQ_BACKFILL_MIN_AGE, WINDOW_SIZE, THRESHOLD_* (só para dlq replay)`
 
 func main() { os.Exit(realMain()) }
 
@@ -92,11 +94,15 @@ func replay(ctx context.Context, brokers []string, registryURL string, env *conf
 	limit := fs.Int("limit", 0, "mensagens por execução (padrão 10, teto DLQ_REPLAY_MAX_BATCH)")
 	reason := fs.String("reason", "", "só este motivo (malformed, unknown_schema, invalid_reading)")
 	execute := fs.Bool("execute", false, "republica de verdade; sem isso é dry-run")
+	backfill := fs.Bool("backfill", false, "recupera leituras de janela já fechada, recalculando e republicando o agregado (exige POSTGRES_DSN)")
 	operator := fs.String("operator", "", "quem executa; obrigatório com -execute")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	redisAddr := env.String("REDIS_ADDR", "")
+	postgresDSN := env.String("POSTGRES_DSN", "")
+	sinkGroup := env.String("DLQ_BACKFILL_SINK_GROUP", kafka.DefaultSinkGroup)
+	thresholds := env.Thresholds()
 	cfg := dlq.ConfigFromEnv(env)
 	if err := env.Err(); err != nil {
 		return err
@@ -121,9 +127,27 @@ func replay(ctx context.Context, brokers []string, registryURL string, env *conf
 	if err != nil {
 		return err
 	}
-	r, err := dlq.New(cfg, dlq.Deps{Source: inspector, Publisher: kafka.NewPublisher(producer),
+	deps := dlq.Deps{Source: inspector, Publisher: kafka.NewPublisher(producer),
 		Ledger: dlq.NewRedisLedger(rdb), Decoder: contract.NewDecoder(registry),
-		Checkpoints: kafka.NewCheckpointStore(producer, brokers, schemas.TopicCheckpoints), Logger: slog.Default()})
+		Checkpoints: kafka.NewCheckpointStore(producer, brokers, schemas.TopicCheckpoints), Logger: slog.Default()}
+	if postgresDSN != "" {
+		pg, err := postgres.Open(ctx, postgresDSN)
+		if err != nil {
+			return err
+		}
+		defer pg.Close()
+		aggEnc, err := registry.EncoderFor(ctx, schemas.TopicAggregates)
+		if err != nil {
+			return err
+		}
+		alertEnc, err := registry.EncoderFor(ctx, schemas.TopicAlerts)
+		if err != nil {
+			return err
+		}
+		deps.Backfill = &dlq.BackfillDeps{Sink: kafka.NewSinkProof(inspector, sinkGroup), Ledger: dlq.NewRedisBackfillLedger(rdb), Windows: dlq.NewRedisWindowStore(rdb),
+			Reader: pg.Aggregates(), AggregateCodec: aggEnc, AlertCodec: alertEnc, Thresholds: thresholds}
+	}
+	r, err := dlq.New(cfg, deps)
 	if err != nil {
 		return err
 	}
@@ -131,7 +155,7 @@ func replay(ctx context.Context, brokers []string, registryURL string, env *conf
 	if *operator != "" {
 		op = "cli:" + *operator
 	}
-	res, err := r.Run(ctx, dlq.Request{Operator: op, Limit: *limit, Reason: *reason, Execute: *execute})
+	res, err := r.Run(ctx, dlq.Request{Operator: op, Limit: *limit, Reason: *reason, Execute: *execute, Backfill: *backfill})
 	if err != nil {
 		return err
 	}
