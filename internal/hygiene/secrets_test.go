@@ -151,3 +151,23 @@ func TestSecureInitRefusesToTouchADirectoryItDidNotCreate(t *testing.T) {
 		t.Error("SECURE_DIR relativo aceito")
 	}
 }
+
+// O Dockerfile da raiz faz COPY . .: sem estas entradas, o material de
+// .secure (ca.key, senhas, JAAS) entraria no contexto, na camada do builder e
+// no cache.
+func TestDockerignoreKeepsSecretsOutOfTheBuildContext(t *testing.T) {
+	root, _ := repoFiles(t)
+	b, err := os.ReadFile(filepath.Join(root, ".dockerignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	have := map[string]bool{}
+	for _, l := range strings.Split(string(b), "\n") {
+		have[strings.TrimSpace(l)] = true
+	}
+	for _, entry := range []string{".secure", ".env", "**/.env", "*.key", "*.p12", "*.pem", "*.password"} {
+		if !have[entry] {
+			t.Errorf(".dockerignore sem a entrada %q", entry)
+		}
+	}
+}

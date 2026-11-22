@@ -57,13 +57,23 @@ denied "simulador lê greenhouse.alerts" 'Not authorized to access topics: \[gre
   kafka-console-consumer --bootstrap-server "$B" --consumer.config "$W/ok.properties" \
   --topic greenhouse.alerts --partition 0 --offset earliest --timeout-ms 20000
 
+# --sync é necessário: no kafka-console-producer 3.9 o envio assíncrono só LOGA o erro
+# do callback e o processo sai com 0 (core/src/main/scala/kafka/tools/ConsoleProducer.scala,
+# tag 3.9.0: send() com ErrorLoggingCallback; main() termina em Exit.exit(0)). Com
+# --sync o send(...).get() lança e o processo sai com 1.
 denied "simulador escreve em greenhouse.aggregator.checkpoints" 'Not authorized to access topics: \[greenhouse\.aggregator\.checkpoints\]' \
-  bash -c "printf 'k:v\n' | kafka-console-producer --bootstrap-server '$B' --producer.config '$W/ok.properties' --topic greenhouse.aggregator.checkpoints --property parse.key=true --property key.separator=:"
+  bash -c "printf 'k:v\n' | kafka-console-producer --sync --bootstrap-server '$B' --producer.config '$W/ok.properties' --topic greenhouse.aggregator.checkpoints --property parse.key=true --property key.separator=:"
 
 denied "cliente sem certificado (mTLS)" 'SSL|handshake|authentication|Timed out|disconnected' \
   kafka-topics --bootstrap-server "$B" --command-config "$W/nocert.properties" --list
 
-denied "senha SASL errada" 'Authentication failed|SaslAuthenticationException|Timed out' \
+denied "senha SASL errada" 'Authentication failed|SaslAuthenticationException' \
   kafka-topics --bootstrap-server "$B" --command-config "$W/badpass.properties" --list
+
+# Repete o controle positivo depois das negações: prova que o broker seguia no ar
+# e que as credenciais continuavam válidas, então nenhuma negação acima foi só um
+# broker fora (um "Timed out" casaria com o padrão de "sem certificado").
+allowed "simulador ainda descreve greenhouse.readings (depois das negações)" \
+  kafka-topics --bootstrap-server "$B" --command-config "$W/ok.properties" --describe --topic greenhouse.readings
 
 exit "$fail"

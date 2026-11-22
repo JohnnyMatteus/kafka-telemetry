@@ -131,6 +131,16 @@ jobs:
             test ! -e ".secure/$d/ops.key"
           done
 
+      - name: O contexto de build não carrega o material gerado
+        run: |
+          # Usa o .dockerignore da raiz, o mesmo do `COPY . .` do Dockerfile.
+          docker build -q -f - . <<'DOCKERFILE'
+          FROM busybox:1.37
+          COPY . /ctx
+          RUN test ! -e /ctx/.secure \
+           && test -z "$(find /ctx \( -name '*.key' -o -name '*.p12' -o -name '*.password' -o -name '*_creds' -o -name '*jaas*' \) | head -1)"
+          DOCKERFILE
+
       - name: Sobe o perfil
         run: $COMPOSE up -d --build
 
@@ -162,6 +172,20 @@ jobs:
           docker run --rm --network telemetry-net \
             -v "$PWD/.secure/simulator:/s:ro" -v "$PWD/deploy/secure:/d:ro" \
             confluentinc/cp-kafka:7.9.1 bash /d/prove-acls.sh
+
+      - name: Nada foi gravado nos checkpoints pelo simulador negado
+        run: |
+          # Como ops (superusuário): o tópico tem os checkpoints reais do agregador
+          # e nenhum registro com a chave "k" que o simulador tentou escrever.
+          docker run --rm --network telemetry-net -v "$PWD/.secure/ops:/etc/kafka/secrets:ro" \
+            confluentinc/cp-kafka:7.9.1 bash -c '
+              out="$(kafka-console-consumer --bootstrap-server kafka-secure:29092 --consumer.config /etc/kafka/secrets/ops.properties \
+                --topic greenhouse.aggregator.checkpoints --partition 0 --offset earliest --timeout-ms 20000 \
+                --property print.key=true 2>/dev/null | cut -f1)"
+              echo "registros no tópico de checkpoints: $(grep -c . <<<"$out")"
+              [ -n "$out" ] || { echo "FALHA: o tópico está vazio, a prova seria vazia"; exit 1; }
+              grep -qx k <<<"$out" && { echo "FALHA: o simulador conseguiu escrever"; exit 1; }
+              echo "ok: nada foi gravado pelo simulador"'
 
       - name: "(d) Registry sem senha negado e com a senha do serviço aceito"
         run: |

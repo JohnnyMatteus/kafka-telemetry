@@ -6,3 +6,15 @@ docs
 loadtest-results
 *.md
 .env
+
+# Segredos e material do profile secure: o Dockerfile faz COPY . ., então nada
+# disto pode entrar no contexto, nas camadas nem no cache do build.
+.secure
+.env
+.env.*
+**/.env
+*.key
+*.p12
+*.pem
+*.password
+*_creds
