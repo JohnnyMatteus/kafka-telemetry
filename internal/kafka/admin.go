@@ -51,8 +51,8 @@ func PipelineTopics(partitions int32, minInsyncReplicas int) []TopicSpec {
 }
 
 // EnsureTopics cria os tópicos que ainda não existem. É idempotente.
-func EnsureTopics(ctx context.Context, seeds []string, replication int16, specs []TopicSpec) ([]string, error) {
-	cl, err := kgo.NewClient(kgo.SeedBrokers(seeds...))
+func EnsureTopics(ctx context.Context, seeds []string, replication int16, specs []TopicSpec, opts ...kgo.Opt) ([]string, error) {
+	cl, err := kgo.NewClient(append([]kgo.Opt{kgo.SeedBrokers(seeds...)}, opts...)...)
 	if err != nil {
 		return nil, err
 	}

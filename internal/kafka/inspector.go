@@ -27,16 +27,18 @@ type Inspector struct {
 	throughput pipeline.Throughput
 	client     *kgo.Client
 	admin      *kadm.Client
+	// opts são as opções de segurança, repassadas aos clientes de leitura.
+	opts []kgo.Opt
 }
 
 // NewInspector abre um cliente só para consultas, separado do consumidor do
 // agregador para que uma consulta lenta nunca atrase o processamento.
-func NewInspector(seeds []string, group string, throughput pipeline.Throughput) (*Inspector, error) {
-	cl, err := kgo.NewClient(kgo.SeedBrokers(seeds...))
+func NewInspector(seeds []string, group string, throughput pipeline.Throughput, opts ...kgo.Opt) (*Inspector, error) {
+	cl, err := kgo.NewClient(append([]kgo.Opt{kgo.SeedBrokers(seeds...)}, opts...)...)
 	if err != nil {
 		return nil, fmt.Errorf("cliente de inspeção: %w", err)
 	}
-	return &Inspector{seeds: seeds, group: group, throughput: throughput, client: cl, admin: kadm.NewClient(cl)}, nil
+	return &Inspector{seeds: seeds, group: group, throughput: throughput, client: cl, admin: kadm.NewClient(cl), opts: opts}, nil
 }
 
 // Close encerra o cliente.
@@ -113,10 +115,10 @@ func (i *Inspector) Recent(ctx context.Context, limit int) ([]pipeline.DeadLette
 	}
 	from := max(start, end-int64(limit))
 
-	cl, err := kgo.NewClient(kgo.SeedBrokers(i.seeds...),
+	cl, err := kgo.NewClient(append([]kgo.Opt{kgo.SeedBrokers(i.seeds...),
 		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{
 			schemas.TopicReadingsDLQ: {0: kgo.NewOffset().At(from)},
-		}))
+		})}, i.opts...)...)
 	if err != nil {
 		return nil, fmt.Errorf("ler DLQ: %w", err)
 	}
@@ -181,10 +183,10 @@ func (i *Inspector) Read(ctx context.Context, from int64, limit int) ([]dlq.Entr
 	}
 	want := min(int64(limit), end-from)
 
-	cl, err := kgo.NewClient(kgo.SeedBrokers(i.seeds...),
+	cl, err := kgo.NewClient(append([]kgo.Opt{kgo.SeedBrokers(i.seeds...),
 		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{
 			schemas.TopicReadingsDLQ: {0: kgo.NewOffset().At(from)},
-		}))
+		})}, i.opts...)...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("ler DLQ: %w", err)
 	}

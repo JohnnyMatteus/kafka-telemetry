@@ -45,6 +45,8 @@ type GroupConsumerConfig struct {
 	MaxPollRecords int
 	Linger         time.Duration
 	Hooks          []kgo.Hook
+	// ClientOpts são opções extras do cliente, como as de segurança (Security.Opts).
+	ClientOpts []kgo.Opt
 	// TickInterval, se positivo, acorda o laço a cada intervalo sem registros
 	// para chamar Ticker.Tick (watermark ocioso). Zero desliga.
 	TickInterval time.Duration
@@ -92,7 +94,7 @@ func NewGroupConsumer(cfg GroupConsumerConfig, logger *slog.Logger) (*GroupConsu
 		kgo.OnPartitionsRevoked(g.onRevoked),
 		kgo.OnPartitionsLost(g.onLost),
 		kgo.WithHooks(cfg.Hooks...),
-	}, ProducerOptions(cfg.Linger)...)
+	}, append(ProducerOptions(cfg.Linger), cfg.ClientOpts...)...)
 	cl, err := kgo.NewClient(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("cliente kafka: %w", err)

@@ -17,8 +17,18 @@ type Registry struct {
 }
 
 // NewRegistry cria o adaptador para a URL informada.
-func NewRegistry(url string) (*Registry, error) {
-	cl, err := sr.NewClient(sr.URLs(url))
+//
+// Sem RegistrySecurity o cliente fala sem autenticação (profile padrão).
+func NewRegistry(url string, sec ...RegistrySecurity) (*Registry, error) {
+	opts := []sr.ClientOpt{sr.URLs(url)}
+	for _, s := range sec {
+		extra, err := s.clientOpts(url)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, extra...)
+	}
+	cl, err := sr.NewClient(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("schema registry: %w", err)
 	}

@@ -31,6 +31,8 @@ type options struct {
 	brokers     []string
 	registry    string
 	metricsAddr string
+	kafkaOpts   []kgo.Opt
+	registrySec kafka.RegistrySecurity
 	rate        float64
 	duration    time.Duration
 	linger      time.Duration
@@ -76,6 +78,16 @@ func parseOptions() (options, error) {
 	if err := env.Err(); err != nil {
 		return o, err
 	}
+	sec, err := kafka.SecurityFromEnv(&env)
+	if err != nil {
+		return o, err
+	}
+	if o.kafkaOpts, err = sec.Opts(); err != nil {
+		return o, err
+	}
+	if o.registrySec, err = kafka.RegistrySecurityFromEnv(&env); err != nil {
+		return o, err
+	}
 	if o.rate <= 0 {
 		return o, errors.New("rate deve ser positivo")
 	}
@@ -92,7 +104,7 @@ func run(ctx context.Context, o options, logger *slog.Logger) error {
 	}
 	defer func() { _ = tracing.Shutdown(context.Background()) }()
 
-	encoder, err := readingEncoder(ctx, o.registry)
+	encoder, err := readingEncoder(ctx, o.registry, o.registrySec)
 	if err != nil {
 		return err
 	}
@@ -100,12 +112,12 @@ func run(ctx context.Context, o options, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	client, err := kgo.NewClient(append([]kgo.Opt{
+	client, err := kgo.NewClient(append(append([]kgo.Opt{
 		kgo.SeedBrokers(o.brokers...),
 		kgo.ClientID("greenhouse-simulator"),
 		kgo.DefaultProduceTopic(schemas.TopicReadings),
 		kgo.WithHooks(tracing.Hooks...),
-	}, kafka.ProducerOptions(o.linger)...)...)
+	}, kafka.ProducerOptions(o.linger)...), o.kafkaOpts...)...)
 	if err != nil {
 		return err
 	}
@@ -133,8 +145,8 @@ func run(ctx context.Context, o options, logger *slog.Logger) error {
 	return g.Wait()
 }
 
-func readingEncoder(ctx context.Context, url string) (*contract.Encoder, error) {
-	registry, err := kafka.NewRegistry(url)
+func readingEncoder(ctx context.Context, url string, sec kafka.RegistrySecurity) (*contract.Encoder, error) {
+	registry, err := kafka.NewRegistry(url, sec)
 	if err != nil {
 		return nil, err
 	}
