@@ -11,6 +11,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/aggregation"
+	"github.com/JohnnyMatteus/kafka-telemetry/internal/dlq"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/pipeline"
 	"github.com/JohnnyMatteus/kafka-telemetry/schemas"
 )
@@ -159,4 +160,55 @@ func parseInt(s string) int64 {
 		return -1
 	}
 	return n
+}
+
+// replayReadTimeout cobre a leitura de um bloco para o reprocessamento.
+const replayReadTimeout = 20 * time.Second
+
+// Read implementa dlq.Source: lê até limit mensagens da DLQ a partir de from
+// (ajustado ao início retido do log) e devolve também o offset final.
+func (i *Inspector) Read(ctx context.Context, from int64, limit int) ([]dlq.Entry, int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, replayReadTimeout)
+	defer cancel()
+
+	start, end, err := i.dlqOffsets(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	from = max(from, start)
+	if from >= end || limit <= 0 {
+		return nil, end, nil
+	}
+	want := min(int64(limit), end-from)
+
+	cl, err := kgo.NewClient(kgo.SeedBrokers(i.seeds...),
+		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{
+			schemas.TopicReadingsDLQ: {0: kgo.NewOffset().At(from)},
+		}))
+	if err != nil {
+		return nil, 0, fmt.Errorf("ler DLQ: %w", err)
+	}
+	defer cl.Close()
+
+	out := make([]dlq.Entry, 0, want)
+	for int64(len(out)) < want {
+		fetches := cl.PollFetches(ctx)
+		if err := ctx.Err(); err != nil {
+			return nil, 0, fmt.Errorf("ler DLQ: %w", err)
+		}
+		if errs := fetches.Errors(); len(errs) > 0 {
+			return nil, 0, fmt.Errorf("ler DLQ: %w", errs[0].Err)
+		}
+		fetches.EachRecord(func(r *kgo.Record) {
+			if int64(len(out)) >= want || r.Offset >= end {
+				return
+			}
+			h := make(map[string]string, len(r.Headers))
+			for _, hd := range r.Headers {
+				h[hd.Key] = string(hd.Value)
+			}
+			out = append(out, dlq.Entry{Offset: r.Offset, Key: r.Key, Value: r.Value, Headers: h})
+		})
+	}
+	return out, end, nil
 }

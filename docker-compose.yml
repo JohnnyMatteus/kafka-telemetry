@@ -249,6 +249,8 @@ services:
       REDIS_ADDR: redis:6379
       POSTGRES_DSN: postgres://telemetry:${POSTGRES_PASSWORD:-dev-only-change-me}@postgres:5432/telemetry
       OPERATOR_TOKENS: ${OPERATOR_TOKENS:-ana:dev-only-token-ana,bruno:dev-only-token-bruno}
+      DLQ_REPLAY_TOPIC: ${DLQ_REPLAY_TOPIC:-greenhouse.readings}
+      DLQ_REPLAY_MAX_BATCH: ${DLQ_REPLAY_MAX_BATCH:-100}
       WINDOW_SIZE: ${WINDOW_SIZE:-1m}
       THRESHOLD_TEMPERATURE_MIN: ${THRESHOLD_TEMPERATURE_MIN:-12}
       THRESHOLD_TEMPERATURE_MAX: ${THRESHOLD_TEMPERATURE_MAX:-32}

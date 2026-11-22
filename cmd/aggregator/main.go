@@ -19,6 +19,7 @@ import (
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/api"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/config"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/contract"
+	"github.com/JohnnyMatteus/kafka-telemetry/internal/dlq"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/kafka"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/observability"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/postgres"
@@ -38,6 +39,7 @@ type settings struct {
 	linger         time.Duration
 	window         telemetry.WindowConfig
 	thresholds     telemetry.Thresholds
+	dlqReplay      dlq.Config
 	operators      *api.OperatorAuth
 }
 
@@ -77,6 +79,7 @@ func load() (settings, error) {
 		},
 	}
 	s.thresholds = env.Thresholds()
+	s.dlqReplay = dlq.ConfigFromEnv(&env)
 	if err := env.Err(); err != nil {
 		return s, err
 	}
@@ -133,6 +136,13 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 	if s.operators == nil {
 		logger.Warn("OPERATOR_TOKENS vazio: API de consulta desligada")
 	}
+	throughput := observability.NewThroughput(metrics.ConsumedTotal, time.Minute, 5*time.Second)
+	inspector, err := kafka.NewInspector(s.brokers, s.group, throughput)
+	if err != nil {
+		return err
+	}
+	defer inspector.Close()
+	apiDeps.DLQ, apiDeps.Health = inspector, inspector
 	var stateStore aggregation.StateStore
 	if s.redisAddr != "" {
 		rdb := redis.NewClient(&redis.Options{Addr: s.redisAddr})
@@ -140,6 +150,15 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 		store := state.NewRedisStore(rdb)
 		stateStore = state.NewInstrumented(store, reg)
 		apiDeps.State = store
+		// O ledger da DLQ mora no Redis; sem ele não há reprocessamento.
+		replay, err := dlq.New(s.dlqReplay, dlq.Deps{
+			Source: inspector, Publisher: kafka.NewPublisher(consumer.Client()),
+			Ledger: dlq.NewRedisLedger(rdb), Logger: logger,
+		})
+		if err != nil {
+			return err
+		}
+		apiDeps.Replay = replay
 	}
 	if s.postgresDSN != "" {
 		pg, err := postgres.Open(ctx, s.postgresDSN)
@@ -149,13 +168,6 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 		defer pg.Close()
 		apiDeps.Series, apiDeps.Alerts = pg.Series(), pg.Alerts()
 	}
-	throughput := observability.NewThroughput(metrics.ConsumedTotal, time.Minute, 5*time.Second)
-	inspector, err := kafka.NewInspector(s.brokers, s.group, throughput)
-	if err != nil {
-		return err
-	}
-	defer inspector.Close()
-	apiDeps.DLQ, apiDeps.Health = inspector, inspector
 	routes := api.Routes(apiDeps)
 
 	svc, err := aggregation.New(s.window, s.thresholds,

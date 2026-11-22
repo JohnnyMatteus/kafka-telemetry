@@ -6,20 +6,27 @@
 //	telemetryctl topics            cria os tópicos (idempotente)
 //	telemetryctl schemas check     confere compatibilidade localmente, sem rede
 //	telemetryctl schemas register  configura BACKWARD, pergunta ao registry e registra
+//	telemetryctl dlq replay        reprocessa a DLQ (dry-run, a menos que -execute)
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+	"github.com/twmb/franz-go/pkg/kgo"
+
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/config"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/contract"
+	"github.com/JohnnyMatteus/kafka-telemetry/internal/dlq"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/kafka"
 	"github.com/JohnnyMatteus/kafka-telemetry/schemas"
 )
@@ -29,8 +36,10 @@ const usage = `uso:
   telemetryctl topics [-partitions N] [-replication N] [-min-isr N]
   telemetryctl schemas check
   telemetryctl schemas register
+  telemetryctl dlq replay [-limit N] [-reason R] [-execute -operator NOME]
 
-variáveis: KAFKA_BROKERS (localhost:9092), SCHEMA_REGISTRY_URL (http://localhost:8081)`
+variáveis: KAFKA_BROKERS (localhost:9092), SCHEMA_REGISTRY_URL (http://localhost:8081),
+           REDIS_ADDR, DLQ_REPLAY_TOPIC, DLQ_REPLAY_MAX_BATCH (só para dlq replay)`
 
 func main() { os.Exit(realMain()) }
 
@@ -66,11 +75,67 @@ func run(ctx context.Context, args []string) error {
 		return topics(ctx, brokers, args[1:])
 	case len(args) == 2 && args[0] == "schemas" && args[1] == "check":
 		return checkLocal()
+	case len(args) >= 2 && args[0] == "dlq" && args[1] == "replay":
+		return replay(ctx, brokers, &env, args[2:])
 	case len(args) == 2 && args[0] == "schemas" && args[1] == "register":
 		return register(ctx, registryURL)
 	default:
 		return errors.New(usage)
 	}
+}
+
+// replay reprocessa a DLQ. Sem -execute só mostra o que seria republicado.
+// O operador é declarado pela pessoa que roda o comando, que já precisa de
+// acesso ao broker e ao Redis; fica gravado no ledger e nas mensagens.
+func replay(ctx context.Context, brokers []string, env *config.Env, args []string) error {
+	fs := flag.NewFlagSet("dlq replay", flag.ContinueOnError)
+	limit := fs.Int("limit", 0, "mensagens por execução (padrão 10, teto DLQ_REPLAY_MAX_BATCH)")
+	reason := fs.String("reason", "", "só este motivo (malformed, unknown_schema, invalid_reading)")
+	execute := fs.Bool("execute", false, "republica de verdade; sem isso é dry-run")
+	operator := fs.String("operator", "", "quem executa; obrigatório com -execute")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	redisAddr := env.String("REDIS_ADDR", "")
+	cfg := dlq.ConfigFromEnv(env)
+	if err := env.Err(); err != nil {
+		return err
+	}
+	if redisAddr == "" {
+		return errors.New("REDIS_ADDR é obrigatório: o ledger da DLQ mora no Redis")
+	}
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
+	defer func() { _ = rdb.Close() }()
+	inspector, err := kafka.NewInspector(brokers, "", nil)
+	if err != nil {
+		return err
+	}
+	defer inspector.Close()
+	producer, err := kgo.NewClient(append([]kgo.Opt{kgo.SeedBrokers(brokers...)}, kafka.ProducerOptions(5*time.Millisecond)...)...)
+	if err != nil {
+		return err
+	}
+	defer producer.Close()
+
+	r, err := dlq.New(cfg, dlq.Deps{Source: inspector, Publisher: kafka.NewPublisher(producer),
+		Ledger: dlq.NewRedisLedger(rdb), Logger: slog.Default()})
+	if err != nil {
+		return err
+	}
+	op := ""
+	if *operator != "" {
+		op = "cli:" + *operator
+	}
+	res, err := r.Run(ctx, dlq.Request{Operator: op, Limit: *limit, Reason: *reason, Execute: *execute})
+	if err != nil {
+		return err
+	}
+	out, _ := json.MarshalIndent(res, "", "  ")
+	fmt.Println(string(out))
+	if res.DryRun {
+		fmt.Fprintln(os.Stderr, "dry-run: nada foi republicado; use -execute -operator NOME")
+	}
+	return nil
 }
 
 func topics(ctx context.Context, brokers, args []string) error {

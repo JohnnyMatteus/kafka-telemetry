@@ -378,3 +378,42 @@ func TestInspectorReadsRecentDeadLetters(t *testing.T) {
 		t.Fatalf("headers mal lidos: %+v", got[0])
 	}
 }
+
+// O reprocessador da DLQ lê em ordem a partir de um offset, com limite, e
+// devolve o offset final para saber quando parar.
+func TestInspectorReadsDeadLettersFromOffset(t *testing.T) {
+	e := startRedpanda(t)
+	ctx := context.Background()
+	if _, err := kafka.EnsureTopics(ctx, e.seeds, 1, kafka.PipelineTopics(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	cl, err := kgo.NewClient(kgo.SeedBrokers(e.seeds...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cl.Close()
+	for _, key := range []string{"gh-a", "gh-b", "gh-c", "gh-d"} {
+		rec := &kgo.Record{Topic: schemas.TopicReadingsDLQ, Key: []byte(key), Value: []byte("x"), Headers: []kgo.RecordHeader{
+			{Key: aggregation.HeaderSourceTopic, Value: []byte(schemas.TopicReadings)},
+		}}
+		if err := cl.ProduceSync(ctx, rec).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	in, err := kafka.NewInspector(e.seeds, "greenhouse-aggregator", noThroughput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	got, end, err := in.Read(ctx, 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if end != 4 || len(got) != 2 || got[0].Offset != 1 || string(got[0].Key) != "gh-b" || got[1].Offset != 2 ||
+		got[0].Headers[aggregation.HeaderSourceTopic] != schemas.TopicReadings {
+		t.Fatalf("end=%d got=%+v", end, got)
+	}
+	if got, _, _ = in.Read(ctx, 4, 10); len(got) != 0 {
+		t.Fatalf("depois do fim: %+v", got)
+	}
+}

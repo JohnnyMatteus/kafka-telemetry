@@ -84,6 +84,25 @@ Formato livre, pensado para painel. Lag vem do broker (offset commitado contra o
 
 `throughput_window_seconds` é o intervalo realmente medido (0 logo após a partida, quando a vazão ainda é 0).
 
+## POST /dlq/replay
+
+Reprocessa a DLQ: republica no tópico de leituras o que o agregador recusou, depois que a causa foi corrigida. Corpo opcional `{"limit":10,"reason":"unknown_schema","dry_run":true}`.
+
+- `dry_run` ausente vale `true`: a resposta mostra o que seria republicado e nada é gravado. Só `"dry_run":false` republica.
+- `limit` padrão 10, de 1 a `DLQ_REPLAY_MAX_BATCH` (padrão 100, teto 1000); acima disso, `400`.
+- `reason` filtra por `malformed`, `unknown_schema` ou `invalid_reading`; outro valor é `400`.
+- O destino vem de `DLQ_REPLAY_TOPIC` e não existe no corpo: um campo `destination` (ou qualquer campo desconhecido) é `400`. Só mensagens cujo header `dlq.source.topic` é o destino são elegíveis.
+- Cada mensagem da DLQ é republicada no máximo uma vez (ledger no Redis); repetir o pedido pega só o que sobrou. `409` se outra execução está em andamento.
+- A mensagem republicada leva `dlq.replayed.by` (operador do token), `dlq.replay.run` e `dlq.replay.source.offset`; o ledger guarda operador, execução e horário.
+
+```json
+{"run_id":"9f2c1e0a4b7d3c55","dry_run":false,"operator":"ana","destination_topic":"greenhouse.readings",
+ "scanned":3,"selected":[{"offset":0,"reason":"unknown_schema","action":"replayed"}],
+ "replayed":1,"skipped":{"foreign_source":2}}
+```
+
+A rota só existe com `REDIS_ADDR` (o ledger). O mesmo caso de uso roda pela linha de comando: `telemetryctl dlq replay [-limit N] [-reason R] [-execute -operator NOME]`.
+
 ## Configuração
 
 | Variável | Efeito |
@@ -92,4 +111,6 @@ Formato livre, pensado para painel. Lag vem do broker (offset commitado contra o
 | `OPERATOR_TOKENS` | `operador:token,...`; tokens de 8 ou mais caracteres. Sem ela, a API não é registrada |
 | `POSTGRES_DSN` | liga séries e alertas; cria as colunas de reconhecimento (`acknowledged_at`, `acknowledged_by`, `note`) se faltarem |
 | `KAFKA_BROKERS` | DLQ e saúde do pipeline |
+| `DLQ_REPLAY_TOPIC` | destino do reprocessamento (padrão `greenhouse.readings`) |
+| `DLQ_REPLAY_MAX_BATCH` | teto de mensagens por execução (padrão 100, máximo 1000) |
 | `THRESHOLD_*` | faixas agronômicas |
