@@ -24,3 +24,6 @@ config.local.yaml
 /e2e/evidencia/node_modules/
 /e2e/evidencia/test-results/
 /e2e/evidencia/playwright-report/
+
+# Material do profile secure (CA, chaves, senhas, JAAS): gerado por make secure-init
+/.secure/

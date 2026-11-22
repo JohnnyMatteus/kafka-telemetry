@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/twmb/franz-go/pkg/kgo"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/aggregation"
@@ -41,6 +42,8 @@ type settings struct {
 	thresholds     telemetry.Thresholds
 	dlqReplay      dlq.Config
 	sinkGroup      string
+	kafkaOpts      []kgo.Opt
+	registrySec    kafka.RegistrySecurity
 	operators      *api.OperatorAuth
 }
 
@@ -84,6 +87,19 @@ func load() (settings, error) {
 		},
 	}
 	s.thresholds = env.Thresholds()
+	if err := env.Err(); err != nil {
+		return s, err
+	}
+	sec, err := kafka.SecurityFromEnv(&env)
+	if err != nil {
+		return s, err
+	}
+	if s.kafkaOpts, err = sec.Opts(); err != nil {
+		return s, err
+	}
+	if s.registrySec, err = kafka.RegistrySecurityFromEnv(&env); err != nil {
+		return s, err
+	}
 	s.dlqReplay = dlq.ConfigFromEnv(&env)
 	s.sinkGroup = env.String("DLQ_BACKFILL_SINK_GROUP", kafka.DefaultSinkGroup)
 	if err := env.Err(); err != nil {
@@ -110,7 +126,7 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 	}
 	defer func() { _ = tracing.Shutdown(context.Background()) }()
 
-	registry, err := kafka.NewRegistry(s.registry)
+	registry, err := kafka.NewRegistry(s.registry, s.registrySec)
 	if err != nil {
 		return err
 	}
@@ -131,6 +147,7 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 		Linger:         s.linger,
 		Hooks:          tracing.Hooks,
 		TickInterval:   tickInterval(s.window),
+		ClientOpts:     s.kafkaOpts,
 	}, logger)
 	if err != nil {
 		return err
@@ -144,7 +161,7 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 		logger.Warn("OPERATOR_TOKENS vazio: API de consulta desligada")
 	}
 	throughput := observability.NewThroughput(metrics.ConsumedTotal, time.Minute, 5*time.Second)
-	inspector, err := kafka.NewInspector(s.brokers, s.group, throughput)
+	inspector, err := kafka.NewInspector(s.brokers, s.group, throughput, s.kafkaOpts...)
 	if err != nil {
 		return err
 	}
@@ -174,7 +191,7 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 		deps := dlq.Deps{
 			Source: inspector, Publisher: kafka.NewPublisher(consumer.Client()),
 			Ledger: dlq.NewRedisLedger(rdb), Decoder: contract.NewDecoder(registry),
-			Checkpoints: kafka.NewCheckpointStore(consumer.Client(), s.brokers, schemas.TopicCheckpoints), Logger: logger,
+			Checkpoints: kafka.NewCheckpointStore(consumer.Client(), s.brokers, schemas.TopicCheckpoints, s.kafkaOpts...), Logger: logger,
 		}
 		if pg != nil {
 			deps.Backfill = &dlq.BackfillDeps{
@@ -198,7 +215,7 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 			AggregateCodec: aggEnc,
 			AlertCodec:     alertEnc,
 			Publisher:      kafka.NewPublisher(consumer.Client()),
-			Checkpoints:    kafka.NewCheckpointStore(consumer.Client(), s.brokers, schemas.TopicCheckpoints),
+			Checkpoints:    kafka.NewCheckpointStore(consumer.Client(), s.brokers, schemas.TopicCheckpoints, s.kafkaOpts...),
 			Committer:      consumer,
 			State:          stateStore,
 			Observer:       metrics,

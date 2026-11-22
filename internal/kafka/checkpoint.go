@@ -23,11 +23,12 @@ type CheckpointStore struct {
 	admin  *kadm.Client
 	seeds  []string
 	topic  string
+	opts   []kgo.Opt
 }
 
 // NewCheckpointStore cria o store. client precisa ter ProducerOptions.
-func NewCheckpointStore(client *kgo.Client, seeds []string, topic string) *CheckpointStore {
-	return &CheckpointStore{client: client, admin: kadm.NewClient(client), seeds: seeds, topic: topic}
+func NewCheckpointStore(client *kgo.Client, seeds []string, topic string, opts ...kgo.Opt) *CheckpointStore {
+	return &CheckpointStore{client: client, admin: kadm.NewClient(client), seeds: seeds, topic: topic, opts: opts}
 }
 
 type checkpointValue struct {
@@ -87,7 +88,7 @@ func (s *CheckpointStore) Load(ctx context.Context) (map[aggregation.TopicPartit
 		return out, nil
 	}
 
-	reader, err := kgo.NewClient(kgo.SeedBrokers(s.seeds...), kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{s.topic: start}))
+	reader, err := kgo.NewClient(append([]kgo.Opt{kgo.SeedBrokers(s.seeds...), kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{s.topic: start})}, s.opts...)...)
 	if err != nil {
 		return nil, err
 	}

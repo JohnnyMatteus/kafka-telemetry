@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/twmb/franz-go/pkg/kgo"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/config"
@@ -40,6 +41,8 @@ type settings struct {
 	retryMaxAge  time.Duration
 	retryBase    time.Duration
 	retryEvery   time.Duration
+	kafkaOpts    []kgo.Opt
+	registrySec  kafka.RegistrySecurity
 }
 
 func main() { os.Exit(realMain()) }
@@ -81,6 +84,16 @@ func load() (settings, error) {
 		retryEvery:   env.Duration("NOTIFY_RETRY_INTERVAL", 5*time.Second),
 	}
 	if err := env.Err(); err != nil {
+		return s, err
+	}
+	sec, err := kafka.SecurityFromEnv(&env)
+	if err != nil {
+		return s, err
+	}
+	if s.kafkaOpts, err = sec.Opts(); err != nil {
+		return s, err
+	}
+	if s.registrySec, err = kafka.RegistrySecurityFromEnv(&env); err != nil {
 		return s, err
 	}
 	switch {
@@ -133,12 +146,12 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 		return err
 	}
 
-	registry, err := kafka.NewRegistry(s.registry)
+	registry, err := kafka.NewRegistry(s.registry, s.registrySec)
 	if err != nil {
 		return err
 	}
 	consumer, err := kafka.NewGroupConsumer(kafka.GroupConsumerConfig{
-		Seeds: s.brokers, Group: s.group, Topic: schemas.TopicAlerts, MaxPollRecords: 100, Linger: 5 * time.Millisecond,
+		Seeds: s.brokers, Group: s.group, Topic: schemas.TopicAlerts, MaxPollRecords: 100, Linger: 5 * time.Millisecond, ClientOpts: s.kafkaOpts,
 	}, logger)
 	if err != nil {
 		return err

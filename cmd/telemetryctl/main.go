@@ -40,6 +40,7 @@ const usage = `uso:
   telemetryctl dlq replay [-limit N] [-reason R] [-backfill] [-execute -operator NOME]
 
 variáveis: KAFKA_BROKERS (localhost:9092), SCHEMA_REGISTRY_URL (http://localhost:8081),
+           KAFKA_TLS_*, KAFKA_SASL_*, SCHEMA_REGISTRY_USER/PASSWORD_FILE/CA_FILE (profile secure),
            REDIS_ADDR, POSTGRES_DSN (backfill), DLQ_REPLAY_TOPIC, DLQ_REPLAY_MAX_BATCH,
            DLQ_BACKFILL_MIN_AGE, WINDOW_SIZE, THRESHOLD_* (só para dlq replay)`
 
@@ -64,23 +65,35 @@ func run(ctx context.Context, args []string) error {
 	if err := env.Err(); err != nil {
 		return err
 	}
+	sec, err := kafka.SecurityFromEnv(&env)
+	if err != nil {
+		return err
+	}
+	kopts, err := sec.Opts()
+	if err != nil {
+		return err
+	}
+	rsec, err := kafka.RegistrySecurityFromEnv(&env)
+	if err != nil {
+		return err
+	}
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
 	switch {
 	case len(args) == 1 && args[0] == "init":
-		if err := topics(ctx, brokers, nil); err != nil {
+		if err := topics(ctx, brokers, nil, kopts); err != nil {
 			return err
 		}
-		return register(ctx, registryURL)
+		return register(ctx, registryURL, rsec)
 	case args[0] == "topics":
-		return topics(ctx, brokers, args[1:])
+		return topics(ctx, brokers, args[1:], kopts)
 	case len(args) == 2 && args[0] == "schemas" && args[1] == "check":
 		return checkLocal()
 	case len(args) >= 2 && args[0] == "dlq" && args[1] == "replay":
-		return replay(ctx, brokers, registryURL, &env, args[2:])
+		return replay(ctx, brokers, registryURL, &env, args[2:], kopts, rsec)
 	case len(args) == 2 && args[0] == "schemas" && args[1] == "register":
-		return register(ctx, registryURL)
+		return register(ctx, registryURL, rsec)
 	default:
 		return errors.New(usage)
 	}
@@ -89,7 +102,7 @@ func run(ctx context.Context, args []string) error {
 // replay reprocessa a DLQ. Sem -execute só mostra o que seria republicado.
 // O operador é declarado pela pessoa que roda o comando, que já precisa de
 // acesso ao broker e ao Redis; fica gravado no ledger e nas mensagens.
-func replay(ctx context.Context, brokers []string, registryURL string, env *config.Env, args []string) error {
+func replay(ctx context.Context, brokers []string, registryURL string, env *config.Env, args []string, kopts []kgo.Opt, rsec kafka.RegistrySecurity) error {
 	fs := flag.NewFlagSet("dlq replay", flag.ContinueOnError)
 	limit := fs.Int("limit", 0, "mensagens por execução (padrão 10, teto DLQ_REPLAY_MAX_BATCH)")
 	reason := fs.String("reason", "", "só este motivo (malformed, unknown_schema, invalid_reading)")
@@ -112,24 +125,24 @@ func replay(ctx context.Context, brokers []string, registryURL string, env *conf
 	}
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 	defer func() { _ = rdb.Close() }()
-	inspector, err := kafka.NewInspector(brokers, "", nil)
+	inspector, err := kafka.NewInspector(brokers, "", nil, kopts...)
 	if err != nil {
 		return err
 	}
 	defer inspector.Close()
-	producer, err := kgo.NewClient(append([]kgo.Opt{kgo.SeedBrokers(brokers...)}, kafka.ProducerOptions(5*time.Millisecond)...)...)
+	producer, err := kgo.NewClient(append(append([]kgo.Opt{kgo.SeedBrokers(brokers...)}, kafka.ProducerOptions(5*time.Millisecond)...), kopts...)...)
 	if err != nil {
 		return err
 	}
 	defer producer.Close()
 
-	registry, err := kafka.NewRegistry(registryURL)
+	registry, err := kafka.NewRegistry(registryURL, rsec)
 	if err != nil {
 		return err
 	}
 	deps := dlq.Deps{Source: inspector, Publisher: kafka.NewPublisher(producer),
 		Ledger: dlq.NewRedisLedger(rdb), Decoder: contract.NewDecoder(registry),
-		Checkpoints: kafka.NewCheckpointStore(producer, brokers, schemas.TopicCheckpoints), Logger: slog.Default()}
+		Checkpoints: kafka.NewCheckpointStore(producer, brokers, schemas.TopicCheckpoints, kopts...), Logger: slog.Default()}
 	if postgresDSN != "" {
 		pg, err := postgres.Open(ctx, postgresDSN)
 		if err != nil {
@@ -167,7 +180,7 @@ func replay(ctx context.Context, brokers []string, registryURL string, env *conf
 	return nil
 }
 
-func topics(ctx context.Context, brokers, args []string) error {
+func topics(ctx context.Context, brokers, args []string, kopts []kgo.Opt) error {
 	fs := flag.NewFlagSet("topics", flag.ContinueOnError)
 	partitions := fs.Int("partitions", 6, "partições dos tópicos de dados")
 	replication := fs.Int("replication", 1, "fator de replicação (3 em produção)")
@@ -175,7 +188,7 @@ func topics(ctx context.Context, brokers, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	created, err := kafka.EnsureTopics(ctx, brokers, int16(*replication), kafka.PipelineTopics(int32(*partitions), *minISR))
+	created, err := kafka.EnsureTopics(ctx, brokers, int16(*replication), kafka.PipelineTopics(int32(*partitions), *minISR), kopts...)
 	for _, t := range created {
 		fmt.Println("tópico criado:", t)
 	}
@@ -207,8 +220,8 @@ func checkLocal() error {
 // register aplica as versões em ordem. O registry é a fonte da verdade: a
 // checagem remota roda antes de cada registro e uma incompatibilidade aborta
 // sem registrar nada daquele subject.
-func register(ctx context.Context, url string) error {
-	registry, err := kafka.NewRegistry(url)
+func register(ctx context.Context, url string, rsec kafka.RegistrySecurity) error {
+	registry, err := kafka.NewRegistry(url, rsec)
 	if err != nil {
 		return err
 	}
