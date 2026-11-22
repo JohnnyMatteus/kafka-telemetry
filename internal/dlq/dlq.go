@@ -375,11 +375,15 @@ func (r *Reprocessor) classify(ctx context.Context, e Entry, marks map[aggregati
 		return ActionWouldReplay, nil
 	}
 	cp, ok := marks[aggregation.TopicPartition{Topic: r.cfg.Destination, Partition: int32(part)}]
-	if !ok || cp.Watermark.IsZero() {
+	if !ok {
+		return ActionWouldReplay, nil
+	}
+	wm := watermarkFor(cp, rec.GreenhouseID)
+	if wm.IsZero() {
 		return ActionWouldReplay, nil
 	}
 	windowEnd := rec.Reading().MeasuredAt.Truncate(r.cfg.WindowSize).Add(r.cfg.WindowSize)
-	if !windowEnd.After(cp.Watermark) {
+	if !windowEnd.After(wm) {
 		return ActionWouldBeLate, nil
 	}
 	return ActionWouldReplay, nil
@@ -439,4 +443,18 @@ func ConfigFromEnv(env *config.Env) Config {
 		WindowSize:  env.Duration("WINDOW_SIZE", time.Minute),
 		MaxBatch:    min(env.Int("DLQ_REPLAY_MAX_BATCH", 100), absoluteMaxBatch),
 	}
+}
+
+// watermarkFor é o watermark que vale para a estufa no checkpoint: o dela, ou
+// o piso (chave vazia, que no escopo por partição é o da partição). Um
+// checkpoint antigo, sem mapa, só tem o da partição.
+func watermarkFor(cp aggregation.Checkpoint, greenhouseID string) time.Time {
+	if len(cp.Watermarks) == 0 {
+		return cp.Watermark
+	}
+	w := cp.Watermarks[""]
+	if g := cp.Watermarks[greenhouseID]; g.After(w) {
+		w = g
+	}
+	return w
 }

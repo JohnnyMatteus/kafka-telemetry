@@ -36,7 +36,7 @@ Para cada lote retornado pelo poll:
 2. Descarta duplicatas por `event_id` e leituras de janelas já fechadas.
 3. Fecha as janelas cujo fim passou do watermark.
 4. **Publica** DLQ, agregados e alertas e espera o ack de todos.
-5. **Grava o checkpoint** de cada partição tocada: offset seguro + watermark.
+5. **Grava o checkpoint** de cada partição tocada quando o offset seguro ou algum watermark mudou: offset seguro + watermarks (o commit do passo seguinte só acontece se o offset mudou).
 6. **Commita** o offset seguro.
 
 Se qualquer passo falha, o processo para sem commitar. O orquestrador reinicia, e a partição recomeça do último commit.
@@ -107,7 +107,7 @@ A frase para a entrevista: **"exactly-once do Kafka é exactly-once dentro do Ka
 
 - Leituras atrasadas além da tolerância (10 s) são descartadas e contadas, não corrigem o agregado já emitido.
 - O tópico de checkpoint é relido inteiro a cada rebalance (é pequeno: uma mensagem por partição).
-- Partição sem tráfego não avança o watermark e segura janelas.
+- Uma estufa (ou a partição, com `WATERMARK_SCOPE=partition`) sem tráfego só tem as janelas fechadas depois de `WATERMARK_IDLE_TIMEOUT`, por `Service.Tick`, na mesma ordem publicar → checkpoint → commit ([ADR 0014](../adr/0014-watermark-por-estufa-e-ocioso.md)).
 - Uma falha de publish derruba o processo (fail-fast) em vez de tentar recuperar o estado em memória.
 
 ## 6. Perguntas que um entrevistador faria

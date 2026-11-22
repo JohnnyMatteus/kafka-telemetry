@@ -89,7 +89,7 @@ A arquitetura é hexagonal: `internal/telemetry` não importa nada de infraestru
 | `greenhouse.aggregates` | `greenhouse_id` | `WindowAggregate` | 6 | 30 dias | Fonte do sink JDBC |
 | `greenhouse.alerts` | `greenhouse_id` | `ThresholdAlert` | 6 | 30 dias | `alert_id` determinístico |
 | `greenhouse.readings.dlq` | original | bytes originais | 1 | 30 dias | Headers `dlq.*` |
-| `greenhouse.aggregator.checkpoints` | `<tópico>/<partição>` | JSON `{offset, watermark_ms}` | 1 | compactado | Estado mínimo do agregador |
+| `greenhouse.aggregator.checkpoints` | `<tópico>/<partição>` | JSON `{offset, watermark_ms, watermarks_ms}` | 1 | compactado | Estado mínimo do agregador |
 
 ### Schemas (Avro, `schemas/avro/`)
 
@@ -219,7 +219,7 @@ Detalhes em [observabilidade.md](observabilidade.md).
 | franz-go | confluent-kafka-go, Sarama | Sem cgo, controle de rebalance | [0002](adr/0002-cliente-franz-go.md) |
 | At-least-once + idempotência | EOS transacional | Destino fora do Kafka, menor latência | [0003](adr/0003-at-least-once-com-idempotencia.md) |
 | BACKWARD (+ transitivo no CI) | FULL, FORWARD | Consumidores atualizados antes dos gateways | [0004](adr/0004-compatibilidade-backward.md) |
-| Tempo de evento + watermark por partição | Tempo de processamento, watermark por estufa | Determinismo com estado pequeno | [0005](adr/0005-janelas-por-tempo-de-evento.md) |
+| Tempo de evento + watermark por estufa, com fechamento ocioso | Tempo de processamento, watermark só por partição | Determinismo e isolamento de relógio adiantado | [0005](adr/0005-janelas-por-tempo-de-evento.md), [0014](adr/0014-watermark-por-estufa-e-ocioso.md) |
 | Kafka KRaft no compose, Redpanda nos testes | ZooKeeper, mocks | Modo atual do Kafka; testes rápidos | [0006](adr/0006-kafka-kraft-e-redpanda-nos-testes.md) |
 | MinIO + S3 sink Parquet | LocalStack, JSON | Só precisamos de S3; formato colunar | [0007](adr/0007-data-lake-no-minio-com-s3-sink.md) |
 | JDBC sink com upsert | Escrita no agregador | Desacoplamento e idempotência | [0008](adr/0008-sink-jdbc-upsert-no-postgres.md) |
@@ -228,8 +228,7 @@ Detalhes em [observabilidade.md](observabilidade.md).
 ## 11. Plano de evolução
 
 0. **Pendências da fundação**: rodada formal do teste de carga.
-1. **Watermark ocioso**: avançar o watermark por tempo de processamento quando uma partição fica sem tráfego.
-2. **Watermark por estufa** para isolar sensores com relógio adiantado.
+1. ~~Watermark ocioso~~ e ~~watermark por estufa~~: feitos ([ADR 0014](adr/0014-watermark-por-estufa-e-ocioso.md)).
 3. **Reprocessador da DLQ**: ferramenta que corrige e republica mensagens da DLQ.
 4. **Notificação de alertas** (consumidor de `greenhouse.alerts` com deduplicação por `alert_id`).
 5. **Segurança do cluster**: SASL/mTLS, ACLs, registry autenticado.

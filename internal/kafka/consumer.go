@@ -23,6 +23,12 @@ type Handler interface {
 	HandleBatch(ctx context.Context, records []aggregation.Record) error
 }
 
+// Ticker é implementado por handlers que precisam agir mesmo sem registros
+// novos, como o fechamento de janelas ociosas.
+type Ticker interface {
+	Tick(ctx context.Context) error
+}
+
 // LoopObserver recebe as métricas do laço de consumo: lag por partição,
 // registros consumidos e duração de cada lote.
 type LoopObserver interface {
@@ -39,6 +45,9 @@ type GroupConsumerConfig struct {
 	MaxPollRecords int
 	Linger         time.Duration
 	Hooks          []kgo.Hook
+	// TickInterval, se positivo, acorda o laço a cada intervalo sem registros
+	// para chamar Ticker.Tick (watermark ocioso). Zero desliga.
+	TickInterval time.Duration
 	// ShutdownGrace é quanto o lote em andamento ainda pode levar depois do
 	// pedido de parada. Padrão: 10 s.
 	ShutdownGrace time.Duration
@@ -106,7 +115,12 @@ func (g *GroupConsumer) Run(ctx context.Context, h Handler, obs LoopObserver) er
 	g.mu.Unlock()
 
 	for {
-		fetches := g.client.PollRecords(ctx, g.cfg.MaxPollRecords)
+		pollCtx, cancelPoll := ctx, context.CancelFunc(func() {})
+		if g.cfg.TickInterval > 0 {
+			pollCtx, cancelPoll = context.WithTimeout(ctx, g.cfg.TickInterval)
+		}
+		fetches := g.client.PollRecords(pollCtx, g.cfg.MaxPollRecords)
+		cancelPoll()
 		// Todo poll que devolve um fetch (inclusive o de contexto cancelado)
 		// bloqueia rebalances até AllowRebalance; sem liberar, o Close e o
 		// LeaveGroup ficariam presos esperando.
@@ -120,6 +134,10 @@ func (g *GroupConsumer) Run(ctx context.Context, h Handler, obs LoopObserver) er
 		}
 		var fetchErr error
 		fetches.EachError(func(topic string, partition int32, err error) {
+			// O fim do prazo do poll não é erro: só indica que não chegou nada.
+			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil && g.cfg.TickInterval > 0 {
+				return
+			}
 			// Erros retentáveis (troca de líder ou de coordenador) o próprio
 			// cliente resolve; só os definitivos derrubam o processo.
 			if kerr.IsRetriable(err) {
@@ -154,7 +172,14 @@ func (g *GroupConsumer) Run(ctx context.Context, h Handler, obs LoopObserver) er
 			g.client.AllowRebalance()
 			return fmt.Errorf("processar lote: %w", err)
 		}
-		if obs != nil {
+		if t, ok := h.(Ticker); ok && g.cfg.TickInterval > 0 {
+			if err := g.withGrace(ctx, t.Tick); err != nil {
+				g.poison()
+				g.client.AllowRebalance()
+				return fmt.Errorf("tick: %w", err)
+			}
+		}
+		if obs != nil && len(batch) > 0 {
 			obs.BatchDuration(time.Since(start))
 		}
 		g.client.AllowRebalance()
@@ -165,11 +190,15 @@ func (g *GroupConsumer) Run(ctx context.Context, h Handler, obs LoopObserver) er
 // cortar no meio deixaria agregados publicados sem checkpoint, e o próximo
 // dono os publicaria de novo. O prazo ShutdownGrace limita a espera.
 func (g *GroupConsumer) handleBatch(ctx context.Context, h Handler, batch []aggregation.Record) error {
-	batchCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	return g.withGrace(ctx, func(c context.Context) error { return h.HandleBatch(c, batch) })
+}
+
+func (g *GroupConsumer) withGrace(ctx context.Context, fn func(context.Context) error) error {
+	graceCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancel()
 	stop := context.AfterFunc(ctx, func() { time.AfterFunc(g.cfg.ShutdownGrace, cancel) })
 	defer stop()
-	return h.HandleBatch(batchCtx, batch)
+	return fn(graceCtx)
 }
 
 // Close sai do grupo e fecha o cliente.
