@@ -134,3 +134,41 @@ func NewSimulatorMetrics(reg prometheus.Registerer) *SimulatorMetrics {
 	reg.MustRegister(m.Produced, m.Errors, m.Latency)
 	return m
 }
+
+// NotifierMetrics implementa notify.Observer e kafka.LoopObserver.
+type NotifierMetrics struct {
+	notifications *prometheus.CounterVec
+	consumed      prometheus.Counter
+	lag           *prometheus.GaugeVec
+	batch         prometheus.Histogram
+}
+
+// NewNotifierMetrics registra as métricas do notificador.
+func NewNotifierMetrics(reg prometheus.Registerer) *NotifierMetrics {
+	m := &NotifierMetrics{
+		notifications: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "telemetry_notifier_notifications_total",
+			Help: "Avisos por canal e resultado (sent, duplicate, failed, permanent_failure, no_recipient, undecodable).",
+		}, []string{"channel", "outcome"}),
+		consumed: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "telemetry_notifier_alerts_consumed_total", Help: "Alertas lidos do tópico.",
+		}),
+		lag: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "telemetry_notifier_consumer_lag", Help: "Alertas entre o high watermark e a posição de consumo.",
+		}, []string{"topic", "partition"}),
+		batch: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: "telemetry_notifier_batch_duration_seconds", Help: "Duração de um lote, incluindo os avisos e o commit.", Buckets: latencyBuckets,
+		}),
+	}
+	reg.MustRegister(m.notifications, m.consumed, m.lag, m.batch)
+	return m
+}
+
+func (m *NotifierMetrics) Notified(channel, outcome string) {
+	m.notifications.WithLabelValues(channel, outcome).Inc()
+}
+func (m *NotifierMetrics) Lag(tp aggregation.TopicPartition, lag int64) {
+	m.lag.With(labels(tp)).Set(float64(lag))
+}
+func (m *NotifierMetrics) Consumed(n int)                { m.consumed.Add(float64(n)) }
+func (m *NotifierMetrics) BatchDuration(d time.Duration) { m.batch.Observe(d.Seconds()) }

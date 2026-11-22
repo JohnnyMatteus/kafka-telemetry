@@ -1,0 +1,38 @@
+{
+  "producers": [
+    {
+      "id": "produtora-ana",
+      "name": "Produtora Ana Exemplo",
+      "email": "ana.produtora@example.com",
+      "greenhouses": [
+        "gh-001",
+        "gh-002",
+        "gh-003",
+        "gh-004",
+        "gh-005",
+        "gh-006",
+        "gh-007",
+        "gh-008",
+        "gh-009",
+        "gh-010"
+      ]
+    },
+    {
+      "id": "produtor-bruno",
+      "name": "Produtor Bruno Exemplo",
+      "email": "bruno.produtor@example.com",
+      "greenhouses": [
+        "gh-011",
+        "gh-012",
+        "gh-013",
+        "gh-014",
+        "gh-015",
+        "gh-016",
+        "gh-017",
+        "gh-018",
+        "gh-019",
+        "gh-020"
+      ]
+    }
+  ]
+}

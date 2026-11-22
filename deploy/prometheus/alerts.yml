@@ -19,3 +19,9 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: "Mais de 5% das leituras indo para a DLQ"
+      - alert: NotifierDeliveryFailing
+        expr: sum(increase(telemetry_notifier_notifications_total{outcome=~"failed|permanent_failure"}[10m])) > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "Avisos de alerta não estão sendo entregues ao produtor rural"
