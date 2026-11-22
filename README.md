@@ -24,6 +24,8 @@ flowchart LR
     AGG --> AG[(greenhouse.aggregates)]
     AGG --> AL[(greenhouse.alerts)]
     AGG --> DLQ[(greenhouse.readings.dlq)]
+    AL --> NTF[Notificador Go]
+    NTF -->|e-mail / webhook assinado| PROD[Produtor rural]
     AGG --> CP[(checkpoints<br/>compactado)]
     AGG -.->|último estado| RD[(Redis)]
     RD --> API[GET /greenhouses/id/state]
@@ -37,6 +39,7 @@ flowchart LR
 
 - **Simulador** (`cmd/simulator`): N estufas × 4 sensores, taxa configurável, com estufas superaquecidas, retransmissões e leituras inválidas para exercitar alertas, deduplicação e DLQ.
 - **Agregador** (`cmd/aggregator`): janelas tumbling de 1 minuto por estufa e grandeza em tempo de evento, deduplicação por `event_id`, alertas, DLQ e commit manual de offset depois do processamento.
+- **Notificador** (`cmd/notifier`): consome os alertas e avisa o produtor rural por e-mail (Mailpit no compose, UI em http://127.0.0.1:8025) e por webhook assinado com HMAC-SHA256 (um segredo por produtor, vindo de variável de ambiente), com idempotência no Redis e retry em dois níveis (rápido e fila durável com idade máxima) ([ADR 0013](docs/adr/0013-notificador-de-alertas.md)). Os produtores e suas estufas vêm de `deploy/notifier/recipients.json`. Os adaptadores foram testados contra um SMTP local de teste e receptores HTTP locais; o Mailpit do compose só foi validado com `docker compose config`; **nada foi exercitado contra um provedor real de e-mail nem um receptor de terceiros**.
 - **Kafka Connect**: sink JDBC com upsert para o Postgres e sink S3 em Parquet para o MinIO, ambos versionados em `connect/`.
 - **telemetryctl**: cria tópicos e registra os schemas com compatibilidade BACKWARD.
 
@@ -75,7 +78,8 @@ docker compose exec minio mc ls --recursive local/agrovale-telemetry-raw | head
 
 | Interface | Endereço |
 | --- | --- |
-| Métricas do simulador / agregador | http://localhost:9101/metrics, http://localhost:9102/metrics |
+| Métricas do simulador / agregador / notificador | http://localhost:9101/metrics, http://localhost:9102/metrics, http://127.0.0.1:9103/metrics |
+| Mailpit, com os e-mails de alerta (só loopback) | http://127.0.0.1:8025 |
 | Prometheus | http://localhost:9090 |
 | Jaeger (com `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318`) | http://localhost:16686 |
 | Console do MinIO (`dev-only-minio` / `dev-only-change-me`) | http://localhost:9001 |
@@ -142,6 +146,7 @@ Resultado do teste de carga e métricas observadas: [docs/teste-de-carga.md](doc
 | [0010](docs/adr/0010-api-de-consulta-no-agregador.md) | API de consulta no processo do agregador |
 | [0011](docs/adr/0011-autenticacao-de-operador-na-api.md) | Autenticação de operador por token e autoria no reconhecimento |
 | [0012](docs/adr/0012-reprocessador-da-dlq.md) | Reprocessador da DLQ: destino fixo, dry-run, ledger e autoria |
+| [0013](docs/adr/0013-notificador-de-alertas.md) | Notificador de alertas: e-mail e webhook assinado, idempotência e retry |
 
 ## Trade-offs
 
@@ -157,7 +162,7 @@ Resultado do teste de carga e métricas observadas: [docs/teste-de-carga.md](doc
 - Rodar `make loadtest` numa máquina dedicada e registrar as métricas em [docs/teste-de-carga.md](docs/teste-de-carga.md) (a rodada formal foi adiada para economizar recursos).
 - Watermark ocioso (por tempo de processamento) e watermark por estufa.
 - Backfill de janelas fechadas para o reprocessador da DLQ recuperar leituras antigas ([ADR 0012](docs/adr/0012-reprocessador-da-dlq.md)).
-- Consumidor de alertas que notifica o produtor rural.
+- Cadastro de produtores fora de arquivo ([ADR 0013](docs/adr/0013-notificador-de-alertas.md)).
 - Extrair a API para um `cmd/api` se a carga de leitura crescer. A autenticação por token de operador e a autoria do reconhecimento de alertas já existem ([ADR 0011](docs/adr/0011-autenticacao-de-operador-na-api.md)).
 - SASL/mTLS, ACLs por serviço e registry autenticado.
 - Dashboards Grafana versionados e SLOs de lag e latência.
@@ -167,7 +172,7 @@ Resultado do teste de carga e métricas observadas: [docs/teste-de-carga.md](doc
 ## Estrutura
 
 ```
-cmd/            simulator, aggregator, telemetryctl
+cmd/            simulator, aggregator, notifier, telemetryctl
 internal/
   telemetry/    domínio puro: leitura, janelas, watermark, dedup, limites
   contract/     formato de fio, codec Avro, compatibilidade, registros
@@ -178,6 +183,7 @@ internal/
   state/        último estado por estufa no Redis e endpoint de leitura
   api/          adaptador HTTP de consulta (estado, séries, alertas, DLQ, saúde)
   dlq/          reprocessador da DLQ (ledger no Redis)
+  notify/       notificador de alertas (canais, idempotência, retry)
   postgres/     séries e alertas com reconhecimento
   alerting/ history/ pipeline/  modelos e portas da API
 schemas/        contratos Avro versionados + fixtures de mudanças incompatíveis

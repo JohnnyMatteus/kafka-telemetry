@@ -49,6 +49,12 @@ Só entra aqui o que o código tem de fato. Cada item aponta o trecho, o problem
 - **Problema**: republicar uma mensagem da DLQ duas vezes, ou duas execuções ao mesmo tempo, duplicaria leituras. O ledger registra cada offset republicado, o lock (`SET NX` com TTL e liberação por comparação) serializa as execuções.
 - **Trade-off**: entre o publish e o ledger há uma janela em que um crash causa republicação; o deduplicador do agregador a absorve dentro do watermark. O lock não é renovado, então a execução inteira roda num contexto de 60 s, menor que o TTL.
 
+### Estratégia por canal e idempotência de entrega (notificador)
+
+- **Onde**: a porta [notify.Channel](../../internal/notify/notify.go) com os adaptadores [EmailChannel](../../internal/notify/email.go) e [WebhookChannel](../../internal/notify/webhook.go); [notify.Service](../../internal/notify/notify.go) escolhe os canais de cada produtor; [RedisSent](../../internal/notify/redis.go) lembra o que já saiu. Decisão no [ADR 0013](../adr/0013-notificador-de-alertas.md).
+- **Problema**: acrescentar um canal sem mexer na regra de quem avisar nem na de não repetir.
+- **Trade-off**: marcar depois de enviar prefere um aviso repetido a um aviso perdido; falha transitória vai para uma fila agendada no Redis com idade máxima ([retry.go](../../internal/notify/retry.go)), em vez de perder o aviso ao commitar o offset.
+
 ### Retry com backoff exponencial
 
 - **Onde**: [Service.decodeWithRetry](../../internal/aggregation/service.go#L246).

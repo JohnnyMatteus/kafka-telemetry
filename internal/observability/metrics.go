@@ -10,6 +10,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/aggregation"
+	"github.com/JohnnyMatteus/kafka-telemetry/internal/notify"
 )
 
 // latencyBuckets cobre de 1 ms a ~2 min: o fim a fim inclui a janela de 1 minuto.
@@ -133,4 +134,56 @@ func NewSimulatorMetrics(reg prometheus.Registerer) *SimulatorMetrics {
 	}
 	reg.MustRegister(m.Produced, m.Errors, m.Latency)
 	return m
+}
+
+// NotifierMetrics implementa notify.Observer e kafka.LoopObserver.
+type NotifierMetrics struct {
+	notifications *prometheus.CounterVec
+	consumed      prometheus.Counter
+	lag           *prometheus.GaugeVec
+	batch         prometheus.Histogram
+	retryDepth    prometheus.Gauge
+	retryOldest   prometheus.Gauge
+}
+
+// NewNotifierMetrics registra as métricas do notificador.
+func NewNotifierMetrics(reg prometheus.Registerer) *NotifierMetrics {
+	m := &NotifierMetrics{
+		notifications: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "telemetry_notifier_notifications_total",
+			Help: "Avisos por canal e resultado (sent, duplicate, queued, failed, expired, permanent_failure, no_recipient, undecodable).",
+		}, []string{"channel", "outcome"}),
+		consumed: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "telemetry_notifier_alerts_consumed_total", Help: "Alertas lidos do tópico.",
+		}),
+		lag: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "telemetry_notifier_consumer_lag", Help: "Alertas entre o high watermark e a posição de consumo.",
+		}, []string{"topic", "partition"}),
+		batch: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: "telemetry_notifier_batch_duration_seconds", Help: "Duração de um lote, incluindo os avisos e o commit.", Buckets: latencyBuckets,
+		}),
+		retryDepth: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "telemetry_notifier_retry_queue_depth", Help: "Avisos esperando nova tentativa.",
+		}),
+		retryOldest: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "telemetry_notifier_retry_oldest_age_seconds", Help: "Idade do aviso mais antigo na fila de retry.",
+		}),
+	}
+	reg.MustRegister(m.notifications, m.consumed, m.lag, m.batch, m.retryDepth, m.retryOldest)
+	return m
+}
+
+func (m *NotifierMetrics) Notified(channel, outcome string) {
+	m.notifications.WithLabelValues(channel, outcome).Inc()
+}
+func (m *NotifierMetrics) Lag(tp aggregation.TopicPartition, lag int64) {
+	m.lag.With(labels(tp)).Set(float64(lag))
+}
+func (m *NotifierMetrics) Consumed(n int)                { m.consumed.Add(float64(n)) }
+func (m *NotifierMetrics) BatchDuration(d time.Duration) { m.batch.Observe(d.Seconds()) }
+
+// QueueStats implementa notify.StatsObserver.
+func (m *NotifierMetrics) QueueStats(st notify.QueueStats) {
+	m.retryDepth.Set(float64(st.Depth))
+	m.retryOldest.Set(st.OldestAge.Seconds())
 }
