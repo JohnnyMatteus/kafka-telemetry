@@ -92,16 +92,18 @@ Reprocessa a DLQ: republica no tópico de leituras o que o agregador recusou, de
 - `limit` padrão 10, de 1 a `DLQ_REPLAY_MAX_BATCH` (padrão 100, teto 1000); acima disso, `400`.
 - `reason` filtra por `malformed`, `unknown_schema` ou `invalid_reading`; outro valor é `400`.
 - O destino vem de `DLQ_REPLAY_TOPIC` e não existe no corpo: um campo `destination` (ou qualquer campo desconhecido) é `400`. Só mensagens cujo header `dlq.source.topic` é o destino são elegíveis.
+- **Leituras atrasadas não são recuperadas.** O agregador descarta (e conta como `late`) a leitura cuja janela já fechou pelo watermark, e hoje não há backfill que recalcule janela fechada. Por isso cada candidata é decodificada e comparada com o watermark do último checkpoint da partição de origem: se a janela já fechou, ela vai para `blocked` com `action: "would_be_late"`, não é republicada e não é marcada no ledger. Mensagem que ainda não decodifica vai para `blocked` como `undecodable` (voltaria à DLQ). O que fica em `selected` tem a janela aberta; o watermark pode andar entre a republicação e o consumo, então `replayed` significa "publicada", não "agregada".
 - Cada mensagem da DLQ é republicada no máximo uma vez (ledger no Redis); repetir o pedido pega só o que sobrou. `409` se outra execução está em andamento.
 - A mensagem republicada leva `dlq.replayed.by` (operador do token), `dlq.replay.run` e `dlq.replay.source.offset`; o ledger guarda operador, execução e horário.
 
 ```json
 {"run_id":"9f2c1e0a4b7d3c55","dry_run":false,"operator":"ana","destination_topic":"greenhouse.readings",
  "scanned":3,"selected":[{"offset":0,"reason":"unknown_schema","action":"replayed"}],
- "replayed":1,"skipped":{"foreign_source":2}}
+ "blocked":[{"offset":1,"reason":"unknown_schema","action":"would_be_late"}],
+ "replayed":1,"skipped":{"foreign_source":1,"would_be_late":1}}
 ```
 
-A rota só existe com `REDIS_ADDR` (o ledger). O mesmo caso de uso roda pela linha de comando: `telemetryctl dlq replay [-limit N] [-reason R] [-execute -operator NOME]`.
+A execução inteira tem um prazo de 60 s, menor que o TTL do lock (2 min, sem renovação). A rota só existe com `REDIS_ADDR` (o ledger). O mesmo caso de uso roda pela linha de comando: `telemetryctl dlq replay [-limit N] [-reason R] [-execute -operator NOME]`.
 
 ## Configuração
 
@@ -112,5 +114,6 @@ A rota só existe com `REDIS_ADDR` (o ledger). O mesmo caso de uso roda pela lin
 | `POSTGRES_DSN` | liga séries e alertas; cria as colunas de reconhecimento (`acknowledged_at`, `acknowledged_by`, `note`) se faltarem |
 | `KAFKA_BROKERS` | DLQ e saúde do pipeline |
 | `DLQ_REPLAY_TOPIC` | destino do reprocessamento (padrão `greenhouse.readings`) |
+| `WINDOW_SIZE` | tamanho da janela, usado pelo reprocessador para saber se a janela de uma leitura já fechou |
 | `DLQ_REPLAY_MAX_BATCH` | teto de mensagens por execução (padrão 100, máximo 1000) |
 | `THRESHOLD_*` | faixas agronômicas |

@@ -153,7 +153,8 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 		// O ledger da DLQ mora no Redis; sem ele não há reprocessamento.
 		replay, err := dlq.New(s.dlqReplay, dlq.Deps{
 			Source: inspector, Publisher: kafka.NewPublisher(consumer.Client()),
-			Ledger: dlq.NewRedisLedger(rdb), Logger: logger,
+			Ledger: dlq.NewRedisLedger(rdb), Decoder: contract.NewDecoder(registry),
+			Checkpoints: kafka.NewCheckpointStore(consumer.Client(), s.brokers, schemas.TopicCheckpoints), Logger: logger,
 		})
 		if err != nil {
 			return err

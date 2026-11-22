@@ -39,7 +39,7 @@ const usage = `uso:
   telemetryctl dlq replay [-limit N] [-reason R] [-execute -operator NOME]
 
 variáveis: KAFKA_BROKERS (localhost:9092), SCHEMA_REGISTRY_URL (http://localhost:8081),
-           REDIS_ADDR, DLQ_REPLAY_TOPIC, DLQ_REPLAY_MAX_BATCH (só para dlq replay)`
+           REDIS_ADDR, DLQ_REPLAY_TOPIC, DLQ_REPLAY_MAX_BATCH, WINDOW_SIZE (só para dlq replay)`
 
 func main() { os.Exit(realMain()) }
 
@@ -76,7 +76,7 @@ func run(ctx context.Context, args []string) error {
 	case len(args) == 2 && args[0] == "schemas" && args[1] == "check":
 		return checkLocal()
 	case len(args) >= 2 && args[0] == "dlq" && args[1] == "replay":
-		return replay(ctx, brokers, &env, args[2:])
+		return replay(ctx, brokers, registryURL, &env, args[2:])
 	case len(args) == 2 && args[0] == "schemas" && args[1] == "register":
 		return register(ctx, registryURL)
 	default:
@@ -87,7 +87,7 @@ func run(ctx context.Context, args []string) error {
 // replay reprocessa a DLQ. Sem -execute só mostra o que seria republicado.
 // O operador é declarado pela pessoa que roda o comando, que já precisa de
 // acesso ao broker e ao Redis; fica gravado no ledger e nas mensagens.
-func replay(ctx context.Context, brokers []string, env *config.Env, args []string) error {
+func replay(ctx context.Context, brokers []string, registryURL string, env *config.Env, args []string) error {
 	fs := flag.NewFlagSet("dlq replay", flag.ContinueOnError)
 	limit := fs.Int("limit", 0, "mensagens por execução (padrão 10, teto DLQ_REPLAY_MAX_BATCH)")
 	reason := fs.String("reason", "", "só este motivo (malformed, unknown_schema, invalid_reading)")
@@ -117,8 +117,13 @@ func replay(ctx context.Context, brokers []string, env *config.Env, args []strin
 	}
 	defer producer.Close()
 
+	registry, err := kafka.NewRegistry(registryURL)
+	if err != nil {
+		return err
+	}
 	r, err := dlq.New(cfg, dlq.Deps{Source: inspector, Publisher: kafka.NewPublisher(producer),
-		Ledger: dlq.NewRedisLedger(rdb), Logger: slog.Default()})
+		Ledger: dlq.NewRedisLedger(rdb), Decoder: contract.NewDecoder(registry),
+		Checkpoints: kafka.NewCheckpointStore(producer, brokers, schemas.TopicCheckpoints), Logger: slog.Default()})
 	if err != nil {
 		return err
 	}

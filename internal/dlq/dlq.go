@@ -7,7 +7,12 @@
 //   - dry-run é o padrão: gravar exige DryRun=false explícito;
 //   - o lote tem teto; o pedido acima dele é recusado;
 //   - cada mensagem da DLQ é republicada no máximo uma vez (ledger durável) e
-//     só uma execução roda por vez (lock);
+//     só uma execução roda por vez (lock), com a execução inteira limitada a
+//     um prazo menor que o TTL do lock;
+//   - uma leitura que o agregador descartaria como atrasada (a janela dela
+//     já fechou pelo watermark do último checkpoint) não é republicada nem
+//     marcada: o resultado a classifica como would_be_late. Não existe hoje
+//     um caminho de backfill que recalcule janelas fechadas (ADR 0012);
 //   - toda mensagem republicada e todo registro do ledger levam o operador.
 package dlq
 
@@ -23,6 +28,7 @@ import (
 
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/aggregation"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/config"
+	"github.com/JohnnyMatteus/kafka-telemetry/internal/contract"
 	"github.com/JohnnyMatteus/kafka-telemetry/schemas"
 )
 
@@ -37,6 +43,8 @@ const (
 const (
 	ActionWouldReplay = "would_replay"
 	ActionReplayed    = "replayed"
+	ActionWouldBeLate = "would_be_late"
+	ActionUndecodable = "undecodable"
 	foreignSource     = "foreign_source"
 	alreadyReplayed   = "already_replayed"
 	filteredOut       = "filtered"
@@ -50,6 +58,9 @@ const (
 	scanChunk        = 500
 	maxScan          = 10_000
 	lockTTL          = 2 * time.Minute
+	// writeTimeout cobre o ledger depois do publish, que não pode ser
+	// abortado pelo prazo da execução (senão a mensagem sairia sem recibo).
+	writeTimeout = 5 * time.Second
 )
 
 var (
@@ -94,6 +105,11 @@ type Ledger interface {
 	SetCursor(ctx context.Context, offset int64) error
 }
 
+// Checkpoints lê os checkpoints do agregador; aggregation.CheckpointStore a satisfaz.
+type Checkpoints interface {
+	Load(ctx context.Context) (map[aggregation.TopicPartition]aggregation.Checkpoint, error)
+}
+
 // Config é a configuração fixa do reprocessador.
 type Config struct {
 	// Destination é o tópico para onde tudo é republicado.
@@ -102,6 +118,11 @@ type Config struct {
 	DLQTopic string
 	// MaxBatch é o teto de mensagens por execução.
 	MaxBatch int
+	// WindowSize é o tamanho da janela do agregador (WINDOW_SIZE); decide se
+	// a janela de uma leitura já fechou.
+	WindowSize time.Duration
+	// RunBudget limita a execução inteira; vazio usa metade do TTL do lock.
+	RunBudget time.Duration
 	// Reasons são os motivos aceitos no filtro; vazio usa os do agregador.
 	Reasons []string
 }
@@ -111,8 +132,12 @@ type Deps struct {
 	Source    Source
 	Publisher aggregation.Publisher
 	Ledger    Ledger
-	Logger    *slog.Logger
-	Clock     func() time.Time
+	// Decoder lê o measured_at da leitura; Checkpoints dá o watermark de cada
+	// partição de origem (os mesmos que o agregador grava).
+	Decoder     aggregation.Decoder
+	Checkpoints Checkpoints
+	Logger      *slog.Logger
+	Clock       func() time.Time
 }
 
 // Request é o que o chamador pode escolher. Destino não está aqui de propósito.
@@ -134,12 +159,15 @@ type Item struct {
 
 // Result resume uma execução.
 type Result struct {
-	RunID    string         `json:"run_id"`
-	DryRun   bool           `json:"dry_run"`
-	Operator string         `json:"operator"`
-	Target   string         `json:"destination_topic"`
-	Scanned  int            `json:"scanned"`
-	Selected []Item         `json:"selected"`
+	RunID    string `json:"run_id"`
+	DryRun   bool   `json:"dry_run"`
+	Operator string `json:"operator"`
+	Target   string `json:"destination_topic"`
+	Scanned  int    `json:"scanned"`
+	Selected []Item `json:"selected"`
+	// Blocked são as mensagens que não seriam recuperadas: would_be_late
+	// (o agregador as descartaria) ou undecodable (continuam recusadas).
+	Blocked  []Item         `json:"blocked"`
 	Replayed int            `json:"replayed"`
 	Skipped  map[string]int `json:"skipped"`
 }
@@ -159,8 +187,15 @@ func New(cfg Config, deps Deps) (*Reprocessor, error) {
 		return nil, errors.New("dlq: o destino não pode ser a própria DLQ")
 	case cfg.MaxBatch < 1:
 		return nil, errors.New("dlq: teto de lote deve ser positivo")
-	case deps.Source == nil || deps.Publisher == nil || deps.Ledger == nil:
+	case cfg.WindowSize <= 0:
+		return nil, errors.New("dlq: tamanho da janela deve ser positivo")
+	case cfg.RunBudget >= lockTTL:
+		return nil, errors.New("dlq: o prazo da execução deve ser menor que o TTL do lock")
+	case deps.Source == nil || deps.Publisher == nil || deps.Ledger == nil || deps.Decoder == nil || deps.Checkpoints == nil:
 		return nil, errors.New("dlq: dependência obrigatória ausente")
+	}
+	if cfg.RunBudget <= 0 {
+		cfg.RunBudget = lockTTL / 2
 	}
 	if len(cfg.Reasons) == 0 {
 		cfg.Reasons = []string{aggregation.ReasonMalformed, aggregation.ReasonUnknownSchema, aggregation.ReasonInvalid}
@@ -194,7 +229,11 @@ func (r *Reprocessor) Run(ctx context.Context, req Request) (Result, error) {
 	}
 
 	res := Result{RunID: newRunID(), DryRun: !req.Execute, Operator: req.Operator,
-		Target: r.cfg.Destination, Selected: []Item{}, Skipped: map[string]int{}}
+		Target: r.cfg.Destination, Selected: []Item{}, Blocked: []Item{}, Skipped: map[string]int{}}
+	// Tudo abaixo roda dentro do prazo, menor que o TTL do lock: o lock não é
+	// renovado, então nenhuma etapa pode sobreviver a ele.
+	ctx, cancel := context.WithTimeout(ctx, r.cfg.RunBudget)
+	defer cancel()
 	if req.Execute {
 		release, err := r.deps.Ledger.Lock(ctx, res.RunID, lockTTL)
 		if err != nil {
@@ -207,7 +246,7 @@ func (r *Reprocessor) Run(ctx context.Context, req Request) (Result, error) {
 	if err != nil {
 		return res, fmt.Errorf("cursor do reprocessamento: %w", err)
 	}
-	picked, scanned, err := r.pick(ctx, cursor, limit, req, &res)
+	picked, scanned, settled, err := r.pick(ctx, cursor, limit, req, &res)
 	if err != nil {
 		return res, err
 	}
@@ -229,32 +268,42 @@ func (r *Reprocessor) Run(ctx context.Context, req Request) (Result, error) {
 		}}
 		receipts[e.Offset] = Receipt{Operator: req.Operator, RunID: res.RunID, At: now}
 	}
+	if err := ctx.Err(); err != nil {
+		return res, fmt.Errorf("prazo da execução esgotado antes de publicar: %w", err)
+	}
 	if err := r.deps.Publisher.Publish(ctx, msgs); err != nil {
 		return res, fmt.Errorf("republicar %d mensagens: %w", len(msgs), err)
 	}
+	wctx, wcancel := context.WithTimeout(context.WithoutCancel(ctx), 2*writeTimeout)
+	defer wcancel()
 	// Se gravar o ledger falhar depois do publish, a execução seguinte
 	// republica o mesmo lote: o agregador deduplica por event_id enquanto o
 	// evento está dentro do watermark. É o preço de não perder mensagem.
-	if err := r.deps.Ledger.Record(ctx, receipts); err != nil {
+	if err := r.deps.Ledger.Record(wctx, receipts); err != nil {
 		return res, fmt.Errorf("registrar republicação: %w", err)
 	}
 	for i := range res.Selected {
 		res.Selected[i].Action = ActionReplayed
 	}
 	res.Replayed = len(picked)
-	r.advanceCursor(ctx, cursor, scanned, receipts)
+	r.advanceCursor(wctx, cursor, scanned, receipts, settled)
 	r.deps.Logger.Info("dlq: reprocessamento", "run", res.RunID, "operator", req.Operator,
 		"replayed", res.Replayed, "destination", r.cfg.Destination)
 	return res, nil
 }
 
 // pick percorre a DLQ a partir do cursor e escolhe até limit mensagens.
-func (r *Reprocessor) pick(ctx context.Context, cursor int64, limit int, req Request, res *Result) (picked, scanned []Entry, err error) {
+func (r *Reprocessor) pick(ctx context.Context, cursor int64, limit int, req Request, res *Result) (picked, scanned []Entry, settled map[int64]bool, err error) {
+	settled = map[int64]bool{}
+	marks, err := r.deps.Checkpoints.Load(ctx)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("carregar checkpoints: %w", err)
+	}
 	from := cursor
 	for len(picked) < limit && len(scanned) < maxScan {
 		entries, end, err := r.deps.Source.Read(ctx, from, scanChunk)
 		if err != nil {
-			return nil, nil, fmt.Errorf("ler a DLQ: %w", err)
+			return nil, nil, nil, fmt.Errorf("ler a DLQ: %w", err)
 		}
 		if len(entries) == 0 {
 			break
@@ -265,7 +314,7 @@ func (r *Reprocessor) pick(ctx context.Context, cursor int64, limit int, req Req
 		}
 		done, err := r.deps.Ledger.Done(ctx, offsets)
 		if err != nil {
-			return nil, nil, fmt.Errorf("consultar o ledger: %w", err)
+			return nil, nil, nil, fmt.Errorf("consultar o ledger: %w", err)
 		}
 		for _, e := range entries {
 			from = e.Offset + 1
@@ -283,7 +332,19 @@ func (r *Reprocessor) pick(ctx context.Context, cursor int64, limit int, req Req
 			case len(e.Value) == 0:
 				res.Skipped[emptyValue]++
 			default:
-				picked = append(picked, e)
+				verdict, err := r.classify(ctx, e, marks)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				if verdict == ActionWouldReplay {
+					picked = append(picked, e)
+					continue
+				}
+				if verdict == ActionWouldBeLate {
+					settled[e.Offset] = true
+				}
+				res.Skipped[verdict]++
+				res.Blocked = append(res.Blocked, Item{Offset: e.Offset, Reason: e.Headers[aggregation.HeaderReason], Action: verdict})
 			}
 		}
 		if from >= end {
@@ -293,12 +354,41 @@ func (r *Reprocessor) pick(ctx context.Context, cursor int64, limit int, req Req
 	if len(scanned) >= maxScan && len(picked) < limit {
 		res.Skipped[scanLimitReached]++
 	}
-	return picked, scanned, nil
+	return picked, scanned, settled, nil
 }
 
-// advanceCursor pula o prefixo já resolvido para que a próxima execução não
+// classify decide se a mensagem seria recuperada: decodifica a leitura (uma
+// que ainda não decodifica voltaria à DLQ) e compara a janela dela com o
+// watermark da partição de origem no último checkpoint. O watermark só
+// avança, então "atrasada" aqui é definitivo; o contrário não é garantia,
+// porque o watermark pode andar entre a republicação e o consumo.
+func (r *Reprocessor) classify(ctx context.Context, e Entry, marks map[aggregation.TopicPartition]aggregation.Checkpoint) (string, error) {
+	var rec contract.SensorReadingRecord
+	if err := r.deps.Decoder.Decode(ctx, e.Value, &rec); err != nil {
+		if errors.Is(err, contract.ErrMalformed) || errors.Is(err, contract.ErrUnknownSchema) {
+			return ActionUndecodable, nil
+		}
+		return "", fmt.Errorf("decodificar o offset %d: %w", e.Offset, err)
+	}
+	part, err := strconv.ParseInt(e.Headers[aggregation.HeaderSourcePartition], 10, 32)
+	if err != nil {
+		return ActionWouldReplay, nil
+	}
+	cp, ok := marks[aggregation.TopicPartition{Topic: r.cfg.Destination, Partition: int32(part)}]
+	if !ok || cp.Watermark.IsZero() {
+		return ActionWouldReplay, nil
+	}
+	windowEnd := rec.Reading().MeasuredAt.Truncate(r.cfg.WindowSize).Add(r.cfg.WindowSize)
+	if !windowEnd.After(cp.Watermark) {
+		return ActionWouldBeLate, nil
+	}
+	return ActionWouldReplay, nil
+}
+
+// advanceCursor pula o prefixo já resolvido (republicado ou atrasado de vez: o
+// watermark só avança, então uma leitura atrasada nunca deixa de ser) para que a próxima execução não
 // releia a DLQ inteira. Uma falha aqui só custa leitura extra.
-func (r *Reprocessor) advanceCursor(ctx context.Context, cursor int64, scanned []Entry, fresh map[int64]Receipt) {
+func (r *Reprocessor) advanceCursor(ctx context.Context, cursor int64, scanned []Entry, fresh map[int64]Receipt, settled map[int64]bool) {
 	offsets := make([]int64, len(scanned))
 	for i, e := range scanned {
 		offsets[i] = e.Offset
@@ -310,7 +400,7 @@ func (r *Reprocessor) advanceCursor(ctx context.Context, cursor int64, scanned [
 	}
 	next := cursor
 	for _, e := range scanned {
-		if !has(done, e.Offset) && !has(fresh, e.Offset) {
+		if !has(done, e.Offset) && !has(fresh, e.Offset) && !settled[e.Offset] {
 			break
 		}
 		next = e.Offset + 1
@@ -346,6 +436,7 @@ func ConfigFromEnv(env *config.Env) Config {
 	return Config{
 		Destination: env.String("DLQ_REPLAY_TOPIC", schemas.TopicReadings),
 		DLQTopic:    schemas.TopicReadingsDLQ,
+		WindowSize:  env.Duration("WINDOW_SIZE", time.Minute),
 		MaxBatch:    min(env.Int("DLQ_REPLAY_MAX_BATCH", 100), absoluteMaxBatch),
 	}
 }

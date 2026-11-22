@@ -47,7 +47,7 @@ Só entra aqui o que o código tem de fato. Cada item aponta o trecho, o problem
 
 - **Onde**: [dlq.Reprocessor](../../internal/dlq/dlq.go) e [dlq.RedisLedger](../../internal/dlq/redis.go); decisão no [ADR 0012](../adr/0012-reprocessador-da-dlq.md).
 - **Problema**: republicar uma mensagem da DLQ duas vezes, ou duas execuções ao mesmo tempo, duplicaria leituras. O ledger registra cada offset republicado, o lock (`SET NX` com TTL e liberação por comparação) serializa as execuções.
-- **Trade-off**: entre o publish e o ledger há uma janela em que um crash causa republicação; o deduplicador do agregador a absorve dentro do watermark.
+- **Trade-off**: entre o publish e o ledger há uma janela em que um crash causa republicação; o deduplicador do agregador a absorve dentro do watermark. O lock não é renovado, então a execução inteira roda num contexto de 60 s, menor que o TTL.
 
 ### Retry com backoff exponencial
 

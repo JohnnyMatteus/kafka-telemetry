@@ -6,12 +6,14 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/aggregation"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/api"
+	"github.com/JohnnyMatteus/kafka-telemetry/internal/contract"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/dlq"
 )
 
@@ -38,14 +40,27 @@ func (p *replayPublisher) Publish(_ context.Context, m []aggregation.Message) er
 	return nil
 }
 
+type fixedDecoder struct{}
+
+func (fixedDecoder) Decode(_ context.Context, _ []byte, v any) error {
+	v.(*contract.SensorReadingRecord).MeasuredAt = now
+	return nil
+}
+
+type noCheckpoints struct{}
+
+func (noCheckpoints) Load(context.Context) (map[aggregation.TopicPartition]aggregation.Checkpoint, error) {
+	return nil, nil
+}
+
 func newReplayServer(t *testing.T) (*httptest.Server, *replayPublisher) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
 	pub := &replayPublisher{}
-	r, err := dlq.New(dlq.Config{Destination: "greenhouse.readings", DLQTopic: "greenhouse.readings.dlq", MaxBatch: 2},
-		dlq.Deps{Source: replaySource{}, Publisher: pub, Ledger: dlq.NewRedisLedger(rdb)})
+	r, err := dlq.New(dlq.Config{Destination: "greenhouse.readings", DLQTopic: "greenhouse.readings.dlq", MaxBatch: 2, WindowSize: time.Minute},
+		dlq.Deps{Source: replaySource{}, Publisher: pub, Ledger: dlq.NewRedisLedger(rdb), Decoder: fixedDecoder{}, Checkpoints: noCheckpoints{}})
 	if err != nil {
 		t.Fatal(err)
 	}
