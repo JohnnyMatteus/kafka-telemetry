@@ -144,3 +144,11 @@ func TestReplayRouteAbsentWithoutReplayer(t *testing.T) {
 		t.Fatalf("code = %d", code)
 	}
 }
+
+func TestReplayBackfillIsRefusedWhenNotConfigured(t *testing.T) {
+	srv, pub := newReplayServer(t)
+	code, _ := post(t, srv, "Bearer "+anaToken, `{"backfill":true,"dry_run":false}`)
+	if code != 501 || len(pub.sent) != 0 {
+		t.Fatalf("code=%d enviadas=%d", code, len(pub.sent))
+	}
+}

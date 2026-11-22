@@ -8,6 +8,7 @@ import (
 	"github.com/twmb/franz-go/pkg/sr"
 
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/contract"
+	"github.com/JohnnyMatteus/kafka-telemetry/schemas"
 )
 
 // Registry adapta o cliente do Schema Registry às necessidades do pipeline.
@@ -81,4 +82,22 @@ func (r *Registry) Lookup(ctx context.Context, subject, schema string) (int, err
 func isCode(err error, code int) bool {
 	var re *sr.ResponseError
 	return errors.As(err, &re) && re.ErrorCode == code
+}
+
+// EncoderFor registra (ou reencontra) a versão mais nova do schema do tópico e
+// devolve o encoder dela.
+func (r *Registry) EncoderFor(ctx context.Context, topic string) (*contract.Encoder, error) {
+	sub, err := schemas.Lookup(topic)
+	if err != nil {
+		return nil, err
+	}
+	text, err := sub.Latest()
+	if err != nil {
+		return nil, err
+	}
+	id, err := r.Lookup(ctx, sub.Name, text)
+	if err != nil {
+		return nil, err
+	}
+	return contract.NewEncoder(id, text)
 }

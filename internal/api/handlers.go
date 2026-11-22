@@ -213,9 +213,10 @@ func (h *handlers) dlq(w http.ResponseWriter, r *http.Request) {
 // o tópico de destino é da configuração. dry_run ausente vale true.
 func (h *handlers) replayDLQ(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Limit  int    `json:"limit"`
-		Reason string `json:"reason"`
-		DryRun *bool  `json:"dry_run"`
+		Limit    int    `json:"limit"`
+		Reason   string `json:"reason"`
+		DryRun   *bool  `json:"dry_run"`
+		Backfill bool   `json:"backfill"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 	dec := json.NewDecoder(r.Body)
@@ -226,11 +227,13 @@ func (h *handlers) replayDLQ(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := h.Replay.Run(r.Context(), dlq.Request{
 		Operator: Operator(r.Context()), Limit: body.Limit, Reason: body.Reason,
-		Execute: body.DryRun != nil && !*body.DryRun,
+		Execute: body.DryRun != nil && !*body.DryRun, Backfill: body.Backfill,
 	})
 	switch {
 	case errors.Is(err, dlq.ErrBatchLimit), errors.Is(err, dlq.ErrUnknownReason):
 		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, dlq.ErrBackfillUnavailable):
+		writeError(w, http.StatusNotImplemented, err.Error())
 	case errors.Is(err, dlq.ErrBusy):
 		writeError(w, http.StatusConflict, "outro reprocessamento em andamento")
 	case err != nil:

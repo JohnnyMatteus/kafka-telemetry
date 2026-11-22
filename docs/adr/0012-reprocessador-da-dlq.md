@@ -22,7 +22,7 @@ A DLQ guarda o que o agregador recusou: mensagem malformada, schema desconhecido
 ## Consequências
 
 - Se o processo cair entre o publish e o ledger, a execução seguinte republica o lote. O agregador deduplica por `event_id` enquanto o evento está dentro do watermark; fora dele a leitura chega atrasada e é descartada e contada. Preferimos isso a perder mensagem (gravar o ledger antes).
-- O principal limite: **este reprocessador só recupera leituras de janelas ainda abertas**. Recuperar as mais antigas exige um caminho de backfill (recalcular a janela histórica e fazer upsert do agregado, idempotente por `event_id`), que não existe e fica como decisão pendente do autor. Até lá, as bloqueadas continuam na DLQ à vista do operador.
+- O modo padrão **só recupera leituras de janelas ainda abertas**. As de janela fechada são recuperadas pelo modo backfill, que recalcula a janela e faz upsert do agregado, idempotente por `event_id` ([ADR 0015](0015-backfill-de-janelas-fechadas.md)); no modo padrão elas continuam na DLQ, à vista do operador.
 - A classificação usa o watermark do checkpoint, que pode estar um lote atrás do real: uma leitura classificada como elegível ainda pode ser descartada se o watermark andar antes de ela ser consumida. O oposto não acontece (o watermark só avança).
 - Uma mensagem que continua inválida volta para a DLQ como entrada nova (offset novo, header de origem do tópico de leituras), então pode ser republicada de novo se alguém repetir. O filtro `reason` e o dry-run servem para o operador decidir; não há contador de tentativas.
 - A API de reprocessamento exige Redis. Sem `REDIS_ADDR`, a rota não existe; o comando falha com mensagem clara.
@@ -31,7 +31,7 @@ A DLQ guarda o que o agregador recusou: mensagem malformada, schema desconhecido
 
 ## Alternativas
 
-- **Backfill de janelas fechadas**: recalcularia a janela e faria upsert (o sink JDBC já é upsert), mas muda a garantia de publicação do agregador e a semântica do tópico de agregados; fica para uma decisão própria.
+- **Backfill de janelas fechadas**: feito como modo à parte, no [ADR 0015](0015-backfill-de-janelas-fechadas.md).
 - **Destino escolhido no pedido**: flexível, mas um operador (ou um token vazado) poderia injetar mensagens em qualquer tópico.
 - **Idempotência só pelo `event_id` do agregador**: o deduplicador é em memória e esquece após o watermark.
 - **Ledger no Postgres**: durável, mas o Redis já está no agregador e o lock vem de graça; os recibos são pequenos e reconstruíveis a partir dos headers.

@@ -109,7 +109,7 @@ O vídeo fica em `e2e/evidencia/test-results/`. Se alguma porta estiver ocupada,
 
 ## API de consulta
 
-O agregador serve estado, séries, alertas com reconhecimento, DLQ, faixas agronômicas (configuráveis), saúde do pipeline e o reprocessamento da DLQ (dry-run por padrão; só recupera leituras de janela ainda aberta, as atrasadas ficam bloqueadas como `would_be_late`; `telemetryctl dlq replay` faz o mesmo) na porta `AGGREGATOR_METRICS_PORT` (9102). Referência completa em [docs/api.md](docs/api.md).
+O agregador serve estado, séries, alertas com reconhecimento, DLQ, faixas agronômicas (configuráveis), saúde do pipeline e o reprocessamento da DLQ (dry-run por padrão; só recupera leituras de janela ainda aberta, as de janela fechada ficam como `would_be_late` e são recuperadas pelo modo `backfill`, que recalcula o agregado da janela com upsert idempotente por `event_id`; `telemetryctl dlq replay` faz o mesmo) na porta `AGGREGATOR_METRICS_PORT` (9102). Referência completa em [docs/api.md](docs/api.md).
 
 ## Como testar
 
@@ -147,6 +147,7 @@ Resultado do teste de carga e métricas observadas: [docs/teste-de-carga.md](doc
 | [0011](docs/adr/0011-autenticacao-de-operador-na-api.md) | Autenticação de operador por token e autoria no reconhecimento |
 | [0012](docs/adr/0012-reprocessador-da-dlq.md) | Reprocessador da DLQ: destino fixo, dry-run, ledger e autoria |
 | [0013](docs/adr/0013-notificador-de-alertas.md) | Notificador de alertas: e-mail e webhook assinado, idempotência e retry |
+| [0015](docs/adr/0015-backfill-de-janelas-fechadas.md) | Backfill de janelas fechadas: recalcula o agregado, idempotente por `event_id` |
 | [0014](docs/adr/0014-watermark-por-estufa-e-ocioso.md) | Watermark por estufa e fechamento ocioso por tempo de processamento |
 
 ## Trade-offs
@@ -161,7 +162,6 @@ Resultado do teste de carga e métricas observadas: [docs/teste-de-carga.md](doc
 ## Próximos passos
 
 - Rodar `make loadtest` numa máquina dedicada e registrar as métricas em [docs/teste-de-carga.md](docs/teste-de-carga.md) (a rodada formal foi adiada para economizar recursos).
-- Backfill de janelas fechadas para o reprocessador da DLQ recuperar leituras antigas ([ADR 0012](docs/adr/0012-reprocessador-da-dlq.md)).
 - Cadastro de produtores fora de arquivo ([ADR 0013](docs/adr/0013-notificador-de-alertas.md)).
 - Extrair a API para um `cmd/api` se a carga de leitura crescer. A autenticação por token de operador e a autoria do reconhecimento de alertas já existem ([ADR 0011](docs/adr/0011-autenticacao-de-operador-na-api.md)).
 - SASL/mTLS, ACLs por serviço e registry autenticado.

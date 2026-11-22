@@ -70,6 +70,8 @@ var (
 	ErrUnknownReason = errors.New("motivo desconhecido")
 	// ErrBusy indica que outra execução está em andamento.
 	ErrBusy = errors.New("outro reprocessamento em andamento")
+	// ErrBackfillUnavailable indica que o backfill não foi ligado (exige Postgres).
+	ErrBackfillUnavailable = errors.New("backfill indisponível: exige POSTGRES_DSN")
 	// ErrOperatorRequired impede gravar sem autoria.
 	ErrOperatorRequired = errors.New("operador obrigatório para reprocessar")
 )
@@ -125,6 +127,13 @@ type Config struct {
 	RunBudget time.Duration
 	// Reasons são os motivos aceitos no filtro; vazio usa os do agregador.
 	Reasons []string
+	// AggregatesTopic e AlertsTopic são os destinos fixos do backfill; vazios
+	// usam os tópicos do pipeline.
+	AggregatesTopic string
+	AlertsTopic     string
+	// BackfillMinAge é a idade mínima do fim da janela para o backfill, para o
+	// agregado original já ter chegado ao Postgres. Vazio vale 5 min.
+	BackfillMinAge time.Duration
 }
 
 // Deps reúne as portas.
@@ -136,8 +145,10 @@ type Deps struct {
 	// partição de origem (os mesmos que o agregador grava).
 	Decoder     aggregation.Decoder
 	Checkpoints Checkpoints
-	Logger      *slog.Logger
-	Clock       func() time.Time
+	// Backfill liga o modo backfill; sem ele, Request.Backfill é recusado.
+	Backfill *BackfillDeps
+	Logger   *slog.Logger
+	Clock    func() time.Time
 }
 
 // Request é o que o chamador pode escolher. Destino não está aqui de propósito.
@@ -148,6 +159,9 @@ type Request struct {
 	Reason string
 	// Execute grava; falso é dry-run.
 	Execute bool
+	// Backfill recupera as leituras de janela já fechada, recalculando e
+	// republicando o agregado da janela (em vez de republicar a leitura).
+	Backfill bool
 }
 
 // Item é o destino de uma mensagem examinada.
@@ -170,6 +184,9 @@ type Result struct {
 	Blocked  []Item         `json:"blocked"`
 	Replayed int            `json:"replayed"`
 	Skipped  map[string]int `json:"skipped"`
+	// Backfill descreve, no modo backfill, as janelas recalculadas (ou que
+	// seriam).
+	Backfill *BackfillResult `json:"backfill,omitempty"`
 }
 
 // Reprocessor é o caso de uso.
@@ -196,6 +213,20 @@ func New(cfg Config, deps Deps) (*Reprocessor, error) {
 	}
 	if cfg.RunBudget <= 0 {
 		cfg.RunBudget = lockTTL / 2
+	}
+	if cfg.AggregatesTopic == "" {
+		cfg.AggregatesTopic = schemas.TopicAggregates
+	}
+	if cfg.AlertsTopic == "" {
+		cfg.AlertsTopic = schemas.TopicAlerts
+	}
+	if cfg.BackfillMinAge <= 0 {
+		cfg.BackfillMinAge = 5 * time.Minute
+	}
+	if deps.Backfill != nil {
+		if err := deps.Backfill.validate(); err != nil {
+			return nil, err
+		}
 	}
 	if len(cfg.Reasons) == 0 {
 		cfg.Reasons = []string{aggregation.ReasonMalformed, aggregation.ReasonUnknownSchema, aggregation.ReasonInvalid}
@@ -227,6 +258,9 @@ func (r *Reprocessor) Run(ctx context.Context, req Request) (Result, error) {
 	if req.Execute && req.Operator == "" {
 		return Result{}, ErrOperatorRequired
 	}
+	if req.Backfill && r.deps.Backfill == nil {
+		return Result{}, ErrBackfillUnavailable
+	}
 
 	res := Result{RunID: newRunID(), DryRun: !req.Execute, Operator: req.Operator,
 		Target: r.cfg.Destination, Selected: []Item{}, Blocked: []Item{}, Skipped: map[string]int{}}
@@ -242,6 +276,9 @@ func (r *Reprocessor) Run(ctx context.Context, req Request) (Result, error) {
 		defer release()
 	}
 
+	if req.Backfill {
+		return r.backfill(ctx, req, limit, res)
+	}
 	cursor, err := r.deps.Ledger.Cursor(ctx)
 	if err != nil {
 		return res, fmt.Errorf("cursor do reprocessamento: %w", err)
@@ -316,6 +353,12 @@ func (r *Reprocessor) pick(ctx context.Context, cursor int64, limit int, req Req
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("consultar o ledger: %w", err)
 		}
+		var doneB map[int64]Receipt
+		if r.deps.Backfill != nil {
+			if doneB, err = r.deps.Backfill.Ledger.Done(ctx, offsets); err != nil {
+				return nil, nil, nil, fmt.Errorf("consultar o ledger do backfill: %w", err)
+			}
+		}
 		for _, e := range entries {
 			from = e.Offset + 1
 			if len(picked) >= limit {
@@ -325,6 +368,9 @@ func (r *Reprocessor) pick(ctx context.Context, cursor int64, limit int, req Req
 			switch {
 			case has(done, e.Offset):
 				res.Skipped[alreadyReplayed]++
+			case has(doneB, e.Offset):
+				res.Skipped[alreadyBackfilled]++
+				settled[e.Offset] = true
 			case e.Headers[aggregation.HeaderSourceTopic] != r.cfg.Destination:
 				res.Skipped[foreignSource]++
 			case req.Reason != "" && e.Headers[aggregation.HeaderReason] != req.Reason:
@@ -363,41 +409,51 @@ func (r *Reprocessor) pick(ctx context.Context, cursor int64, limit int, req Req
 // avança, então "atrasada" aqui é definitivo; o contrário não é garantia,
 // porque o watermark pode andar entre a republicação e o consumo.
 func (r *Reprocessor) classify(ctx context.Context, e Entry, marks map[aggregation.TopicPartition]aggregation.Checkpoint) (string, error) {
+	verdict, _, err := r.inspect(ctx, e, marks)
+	return verdict, err
+}
+
+// inspect é o classify que também devolve a leitura decodificada.
+func (r *Reprocessor) inspect(ctx context.Context, e Entry, marks map[aggregation.TopicPartition]aggregation.Checkpoint) (string, contract.SensorReadingRecord, error) {
 	var rec contract.SensorReadingRecord
 	if err := r.deps.Decoder.Decode(ctx, e.Value, &rec); err != nil {
 		if errors.Is(err, contract.ErrMalformed) || errors.Is(err, contract.ErrUnknownSchema) {
-			return ActionUndecodable, nil
+			return ActionUndecodable, rec, nil
 		}
-		return "", fmt.Errorf("decodificar o offset %d: %w", e.Offset, err)
+		return "", rec, fmt.Errorf("decodificar o offset %d: %w", e.Offset, err)
 	}
 	part, err := strconv.ParseInt(e.Headers[aggregation.HeaderSourcePartition], 10, 32)
 	if err != nil {
-		return ActionWouldReplay, nil
+		return ActionWouldReplay, rec, nil
 	}
 	cp, ok := marks[aggregation.TopicPartition{Topic: r.cfg.Destination, Partition: int32(part)}]
 	if !ok {
-		return ActionWouldReplay, nil
+		return ActionWouldReplay, rec, nil
 	}
 	wm := watermarkFor(cp, rec.GreenhouseID)
 	if wm.IsZero() {
-		return ActionWouldReplay, nil
+		return ActionWouldReplay, rec, nil
 	}
 	windowEnd := rec.Reading().MeasuredAt.Truncate(r.cfg.WindowSize).Add(r.cfg.WindowSize)
 	if !windowEnd.After(wm) {
-		return ActionWouldBeLate, nil
+		return ActionWouldBeLate, rec, nil
 	}
-	return ActionWouldReplay, nil
+	return ActionWouldReplay, rec, nil
 }
 
 // advanceCursor pula o prefixo já resolvido (republicado ou atrasado de vez: o
 // watermark só avança, então uma leitura atrasada nunca deixa de ser) para que a próxima execução não
 // releia a DLQ inteira. Uma falha aqui só custa leitura extra.
 func (r *Reprocessor) advanceCursor(ctx context.Context, cursor int64, scanned []Entry, fresh map[int64]Receipt, settled map[int64]bool) {
+	r.advanceCursorOn(ctx, r.deps.Ledger, cursor, scanned, fresh, settled)
+}
+
+func (r *Reprocessor) advanceCursorOn(ctx context.Context, ledger Ledger, cursor int64, scanned []Entry, fresh map[int64]Receipt, settled map[int64]bool) {
 	offsets := make([]int64, len(scanned))
 	for i, e := range scanned {
 		offsets[i] = e.Offset
 	}
-	done, err := r.deps.Ledger.Done(ctx, offsets)
+	done, err := ledger.Done(ctx, offsets)
 	if err != nil {
 		r.deps.Logger.Warn("dlq: não foi possível avançar o cursor", "error", err)
 		return
@@ -410,7 +466,7 @@ func (r *Reprocessor) advanceCursor(ctx context.Context, cursor int64, scanned [
 		next = e.Offset + 1
 	}
 	if next > cursor {
-		if err := r.deps.Ledger.SetCursor(ctx, next); err != nil {
+		if err := ledger.SetCursor(ctx, next); err != nil {
 			r.deps.Logger.Warn("dlq: não foi possível avançar o cursor", "error", err)
 		}
 	}
@@ -438,10 +494,11 @@ func newRunID() string {
 // o destino é definido, para o comando e a API não divergirem.
 func ConfigFromEnv(env *config.Env) Config {
 	return Config{
-		Destination: env.String("DLQ_REPLAY_TOPIC", schemas.TopicReadings),
-		DLQTopic:    schemas.TopicReadingsDLQ,
-		WindowSize:  env.Duration("WINDOW_SIZE", time.Minute),
-		MaxBatch:    min(env.Int("DLQ_REPLAY_MAX_BATCH", 100), absoluteMaxBatch),
+		Destination:    env.String("DLQ_REPLAY_TOPIC", schemas.TopicReadings),
+		DLQTopic:       schemas.TopicReadingsDLQ,
+		WindowSize:     env.Duration("WINDOW_SIZE", time.Minute),
+		BackfillMinAge: env.Duration("DLQ_BACKFILL_MIN_AGE", 5*time.Minute),
+		MaxBatch:       min(env.Int("DLQ_REPLAY_MAX_BATCH", 100), absoluteMaxBatch),
 	}
 }
 

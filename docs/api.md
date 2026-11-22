@@ -92,7 +92,7 @@ Reprocessa a DLQ: republica no tópico de leituras o que o agregador recusou, de
 - `limit` padrão 10, de 1 a `DLQ_REPLAY_MAX_BATCH` (padrão 100, teto 1000); acima disso, `400`.
 - `reason` filtra por `malformed`, `unknown_schema` ou `invalid_reading`; outro valor é `400`.
 - O destino vem de `DLQ_REPLAY_TOPIC` e não existe no corpo: um campo `destination` (ou qualquer campo desconhecido) é `400`. Só mensagens cujo header `dlq.source.topic` é o destino são elegíveis.
-- **Leituras atrasadas não são recuperadas.** O agregador descarta (e conta como `late`) a leitura cuja janela já fechou pelo watermark, e hoje não há backfill que recalcule janela fechada. Por isso cada candidata é decodificada e comparada com o watermark do último checkpoint da partição de origem: se a janela já fechou, ela vai para `blocked` com `action: "would_be_late"`, não é republicada e não é marcada no ledger. Mensagem que ainda não decodifica vai para `blocked` como `undecodable` (voltaria à DLQ). O que fica em `selected` tem a janela aberta; o watermark pode andar entre a republicação e o consumo, então `replayed` significa "publicada", não "agregada".
+- **Leituras de janela já fechada não são republicadas pelo modo padrão** (use `"backfill":true`, abaixo). O agregador as descarta e conta como `late`, e republicar a leitura não as recupera. Por isso cada candidata é decodificada e comparada com o watermark do último checkpoint da partição de origem: se a janela já fechou, ela vai para `blocked` com `action: "would_be_late"`, não é republicada e não é marcada no ledger. Mensagem que ainda não decodifica vai para `blocked` como `undecodable` (voltaria à DLQ). O que fica em `selected` tem a janela aberta; o watermark pode andar entre a republicação e o consumo, então `replayed` significa "publicada", não "agregada".
 - Cada mensagem da DLQ é republicada no máximo uma vez (ledger no Redis); repetir o pedido pega só o que sobrou. `409` se outra execução está em andamento.
 - A mensagem republicada leva `dlq.replayed.by` (operador do token), `dlq.replay.run` e `dlq.replay.source.offset`; o ledger guarda operador, execução e horário.
 
@@ -101,6 +101,16 @@ Reprocessa a DLQ: republica no tópico de leituras o que o agregador recusou, de
  "scanned":3,"selected":[{"offset":0,"reason":"unknown_schema","action":"replayed"}],
  "blocked":[{"offset":1,"reason":"unknown_schema","action":"would_be_late"}],
  "replayed":1,"skipped":{"foreign_source":1,"would_be_late":1}}
+```
+
+### Backfill de janelas fechadas
+
+`{"backfill":true,"limit":10,"dry_run":true}` recupera as leituras cuja janela já fechou: soma-as ao agregado já emitido da janela (lido do Postgres), republica o agregado recalculado em `greenhouse.aggregates` (o sink faz upsert) e reavalia o alerta. Idempotente por `event_id`; as mesmas regras de dry-run, lote, operador e prazo valem. Só janelas com fim há mais de `DLQ_BACKFILL_MIN_AGE` (5 min) entram; as mais novas ficam em `skipped.too_recent`. Leituras de janela ainda aberta ficam em `skipped.not_late` (use a republicação normal). A resposta traz `backfill.windows`, com `base_count`, `new_events`, `result_count`, `result_mean` e o `alert` que o novo agregado geraria. `501` se o backfill não está ligado (exige `POSTGRES_DSN`). Decisão no [ADR 0015](adr/0015-backfill-de-janelas-fechadas.md).
+
+```json
+{"run_id":"3b1f...","dry_run":true,"backfill":{"windows":[{"greenhouse_id":"gh-001","sensor_type":"TEMPERATURE",
+  "window_start":"2026-03-10T12:00:00Z","new_events":2,"base_count":2,"result_count":4,"result_mean":38.5,"alert":"ABOVE_MAX"}],
+  "republished_pending":0}}
 ```
 
 A execução inteira tem um prazo de 60 s, menor que o TTL do lock (2 min, sem renovação). A rota só existe com `REDIS_ADDR` (o ledger). O mesmo caso de uso roda pela linha de comando: `telemetryctl dlq replay [-limit N] [-reason R] [-execute -operator NOME]`.
@@ -115,5 +125,6 @@ A execução inteira tem um prazo de 60 s, menor que o TTL do lock (2 min, sem r
 | `KAFKA_BROKERS` | DLQ e saúde do pipeline |
 | `DLQ_REPLAY_TOPIC` | destino do reprocessamento (padrão `greenhouse.readings`) |
 | `WINDOW_SIZE` | tamanho da janela, usado pelo reprocessador para saber se a janela de uma leitura já fechou |
+| `DLQ_BACKFILL_MIN_AGE` | idade mínima do fim da janela para o backfill (padrão 5m) |
 | `DLQ_REPLAY_MAX_BATCH` | teto de mensagens por execução (padrão 100, máximo 1000) |
 | `THRESHOLD_*` | faixas agronômicas |
