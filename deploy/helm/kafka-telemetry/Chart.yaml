@@ -1,0 +1,7 @@
+apiVersion: v2
+name: kafka-telemetry
+description: Agregador de telemetria de estufas (Kafka) e notificador de alertas, com autoscaling do agregador pelo lag do consumo.
+type: application
+version: 0.1.0
+# A imagem é a do Dockerfile da raiz (um binário por comando); defina image.repository e image.tag.
+appVersion: "0.1.0"

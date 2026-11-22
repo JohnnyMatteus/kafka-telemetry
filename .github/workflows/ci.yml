@@ -102,3 +102,190 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  secure-profile:
+    name: Perfil seguro (mTLS, SASL, ACLs, registry autenticado)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COMPOSE: docker compose --env-file .secure/secure.env --profile secure
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gera o material do perfil (CA, certificados, senhas e JAAS)
+        run: |
+          ./scripts/secure-init.sh
+          # Nada do que foi gerado pode aparecer em log: mascara cada segredo.
+          for f in .secure/*/*.password .secure/*/*_creds; do
+            v="$(cat "$f")"; [ -n "$v" ] && echo "::add-mask::$v"
+          done
+          echo "::add-mask::$(cut -d= -f2- .secure/secure.env)"
+
+      - name: Cada principal só tem o material dele
+        run: |
+          test -z "$(find .secure -name ca.key -not -path '.secure/ca/*')"
+          for d in aggregator simulator notifier; do
+            for o in aggregator simulator notifier ops; do
+              [ "$d" = "$o" ] || test ! -e ".secure/$d/$o.password"
+            done
+            test ! -e ".secure/$d/ops.key"
+          done
+
+      - name: O contexto de build não carrega o material gerado
+        run: |
+          # Usa o .dockerignore da raiz, o mesmo do `COPY . .` do Dockerfile.
+          docker build -q -f - . <<'DOCKERFILE'
+          FROM busybox:1.37
+          COPY . /ctx
+          RUN test ! -e /ctx/.secure \
+           && test -z "$(find /ctx \( -name '*.key' -o -name '*.p12' -o -name '*.password' -o -name '*_creds' -o -name '*jaas*' \) | head -1)"
+          DOCKERFILE
+
+      - name: Sobe o perfil
+        run: $COMPOSE up -d --build
+
+      - name: Init (ACLs, tópicos e schemas) terminou com sucesso
+        run: |
+          for i in $(seq 1 72); do
+            id="$($COMPOSE ps -a -q init-secure)"
+            st="$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$id" 2>/dev/null || true)"
+            [ "$st" = "exited 0" ] && exit 0
+            case "$st" in "exited "[1-9]*) echo "init-secure falhou ($st)"; exit 1;; esac
+            sleep 5
+          done
+          echo "init-secure não terminou a tempo ($st)"; exit 1
+
+      - name: "(a) Do simulador ao agregador, pelo broker seguro e pelo registry autenticado"
+        run: |
+          for i in $(seq 1 60); do
+            m="$(curl -fsS http://127.0.0.1:9112/metrics 2>/dev/null || true)"
+            consumed="$(awk '/^telemetry_aggregator_records_consumed_total /{print int($2)}' <<<"$m")"
+            emitted="$(awk '/^telemetry_aggregator_aggregates_emitted_total /{print int($2)}' <<<"$m")"
+            echo "tentativa $i: consumidas=${consumed:-0} janelas=${emitted:-0}"
+            [ "${consumed:-0}" -gt 0 ] && [ "${emitted:-0}" -gt 0 ] && exit 0
+            sleep 5
+          done
+          echo "o agregador não consumiu e fechou janelas a tempo"; exit 1
+
+      - name: "(b) Simulador negado em greenhouse.alerts e nos checkpoints; (c) sem certificado e com senha errada negados"
+        run: |
+          docker run --rm --network telemetry-net \
+            -v "$PWD/.secure/simulator:/s:ro" -v "$PWD/deploy/secure:/d:ro" \
+            confluentinc/cp-kafka:7.9.1 bash /d/prove-acls.sh
+
+      - name: Nada foi gravado nos checkpoints pelo simulador negado
+        run: |
+          # Como ops (superusuário): o tópico (1 partição) tem os checkpoints reais do agregador
+          # e nenhum registro com a chave "k" que o simulador tentou escrever.
+          # O agregador grava sem parar, então --timeout-ms (tempo ocioso) sozinho nunca vence:
+          # a leitura tem prazo e precisa alcançar o fim que o tópico tinha ao começar o passo.
+          docker run --rm --network telemetry-net -v "$PWD/.secure/ops:/etc/kafka/secrets:ro" \
+            confluentinc/cp-kafka:7.9.1 bash -c '
+              B=kafka-secure:29092; C=/etc/kafka/secrets/ops.properties; T=greenhouse.aggregator.checkpoints
+              end="$(kafka-get-offsets --bootstrap-server $B --command-config $C --topic $T --time -1 | cut -d: -f3)"
+              case "$end" in ""|0|*[!0-9]*) echo "FALHA: sem offset final, a prova seria vazia"; exit 1;; esac
+              out="$(timeout 60 kafka-console-consumer --bootstrap-server $B --consumer.config $C \
+                --topic $T --partition 0 --offset earliest --timeout-ms 20000 \
+                --property print.offset=true --property print.key=true --property print.value=false 2>/dev/null || true)"
+              last="$(sed -n "s/^Offset:\([0-9][0-9]*\).*/\1/p" <<<"$out" | tail -n 1)"
+              echo "fim do tópico: $end; último offset lido: ${last:-nenhum}"
+              [ -n "$last" ] && [ "$last" -ge "$((end - 1))" ] || { echo "FALHA: a leitura não chegou ao fim"; exit 1; }
+              grep -qE "^Offset:[0-9]+[[:space:]]+k$" <<<"$out" && { echo "FALHA: o simulador conseguiu escrever"; exit 1; }
+              echo "ok: nada foi gravado pelo simulador"'
+
+      - name: "(d) Registry sem senha negado e com a senha do serviço aceito"
+        run: |
+          docker run --rm --network telemetry-net -v "$PWD/.secure/simulator:/s:ro" curlimages/curl:8.11.1 sh -c '
+            sem="$(curl -s -o /dev/null -w "%{http_code}" --cacert /s/ca.crt https://schema-registry-secure:8081/subjects)"
+            errada="$(curl -s -o /dev/null -w "%{http_code}" --cacert /s/ca.crt -u simulator:senha-errada https://schema-registry-secure:8081/subjects)"
+            com="$(curl -s -o /dev/null -w "%{http_code}" --cacert /s/ca.crt -u "simulator:$(cat /s/registry-simulator.password)" https://schema-registry-secure:8081/subjects)"
+            echo "sem senha: $sem, senha errada: $errada, senha do serviço: $com"
+            [ "$sem" = 401 ] && [ "$errada" = 401 ] && [ "$com" = 200 ]'
+
+      - name: Logs dos serviços (só em falha, com segredos redigidos)
+        if: failure()
+        run: |
+          $COMPOSE ps -a || true
+          $COMPOSE logs --no-color --tail=60 2>&1 \
+            | sed -E 's/((password|secret|jaas|credentials)[A-Za-z0-9_.]*[=:] *).*/\1[redigido]/I' || true
+
+      - name: "(e) Derruba o perfil, com volumes, e apaga o material"
+        if: always()
+        run: |
+          $COMPOSE down -v --remove-orphans || true
+          rm -rf .secure
+
+  prometheus-rules:
+    name: Regras e configuração do Prometheus (promtool)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: promtool check config e rules
+        run: |
+          docker run --rm --entrypoint promtool -v "$PWD/deploy/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v2.55.1 check config /etc/prometheus/prometheus.yml
+
+  helm:
+    name: Chart Helm (lint e renderização)
+    runs-on: ubuntu-latest
+    env:
+      CHART: deploy/helm/kafka-telemetry
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: helm lint
+        run: helm lint "$CHART" --strict
+      - name: Renderiza o padrão, sem Secrets e com o selector coerente
+        run: |
+          helm template rel "$CHART" > /tmp/default.yaml
+          if grep -q '^kind: Secret' /tmp/default.yaml; then echo "o chart criou um Secret"; exit 1; fi
+          grep -q 'kind: Deployment' /tmp/default.yaml
+          grep -q 'replicas: 2' /tmp/default.yaml
+          if grep -q 'kind: ScaledObject' /tmp/default.yaml; then echo "ScaledObject com o autoscaling desligado"; exit 1; fi
+      - name: Autoscaling pelo lag, limitado pelas partições
+        run: |
+          helm template rel "$CHART" --set autoscaling.enabled=true --set autoscaling.maxReplicas=20 \
+            --set kafka.partitions=6 --set autoscaling.lagThreshold=3000 > /tmp/keda.yaml
+          grep -q 'kind: ScaledObject' /tmp/keda.yaml
+          grep -q 'maxReplicaCount: 6' /tmp/keda.yaml
+          grep -q 'lagThreshold: "3000"' /tmp/keda.yaml
+          grep -q 'consumerGroup: "greenhouse-aggregator"' /tmp/keda.yaml
+          # Com o ScaledObject, o Deployment não fixa réplicas (o KEDA manda).
+          if awk '/kind: Deployment/,/containers:/' /tmp/keda.yaml | grep -q '^  replicas:'; then
+            echo "o Deployment fixa replicas com o ScaledObject"; exit 1
+          fi
+      - name: minReplicas acima das partições é recusado
+        run: |
+          if helm template rel "$CHART" --set autoscaling.enabled=true --set autoscaling.minReplicas=9 --set kafka.partitions=6 >/dev/null 2>&1; then
+            echo "o chart aceitou minReplicas maior que as partições"; exit 1
+          fi
+      - name: Segurança do Kafka exige o Secret e monta só o que ele traz
+        run: |
+          if helm template rel "$CHART" --set kafka.security.enabled=true >/dev/null 2>&1; then
+            echo "o chart aceitou kafka.security sem secretName"; exit 1
+          fi
+          helm template rel "$CHART" --set kafka.security.enabled=true --set kafka.security.secretName=kafka-tls \
+            --set kafka.security.user=aggregator --set schemaRegistry.auth.enabled=true \
+            --set schemaRegistry.auth.secretName=registry-auth --set schemaRegistry.auth.user=aggregator > /tmp/secure.yaml
+          grep -q 'KAFKA_SASL_PASSWORD_FILE' /tmp/secure.yaml
+          grep -q 'secretName: kafka-tls' /tmp/secure.yaml
+          if grep -q '^kind: Secret' /tmp/secure.yaml; then echo "o chart criou um Secret"; exit 1; fi
+      - name: Notificador, ServiceMonitor e simulador
+        run: |
+          helm template rel "$CHART" --set notifier.enabled=true --set serviceMonitor.enabled=true --set simulator.enabled=true > /tmp/all.yaml
+          grep -q 'kind: ServiceMonitor' /tmp/all.yaml
+          grep -q 'name: rel-notifier' /tmp/all.yaml
+          grep -q 'name: rel-simulator' /tmp/all.yaml
+          grep -q 'recipients.json' /tmp/all.yaml
+          # A imagem declara USER nonroot:nonroot (por nome); com runAsNonRoot o kubelet
+          # exige UID numérico, então todo pod precisa de runAsUser/runAsGroup 65532.
+          pods="$(grep -c '^kind: Deployment' /tmp/all.yaml)"
+          uids="$(grep -c 'runAsUser: 65532' /tmp/all.yaml)"
+          gids="$(grep -c 'runAsGroup: 65532' /tmp/all.yaml)"
+          nonroot="$(grep -c 'runAsNonRoot: true' /tmp/all.yaml)"
+          echo "deployments=$pods runAsUser=$uids runAsGroup=$gids runAsNonRoot=$nonroot"
+          if [ "$pods" -lt 3 ] || [ "$uids" != "$pods" ] || [ "$gids" != "$pods" ] || [ "$nonroot" != "$pods" ]; then
+            echo "todo Deployment precisa de runAsNonRoot com runAsUser e runAsGroup numéricos"; exit 1
+          fi

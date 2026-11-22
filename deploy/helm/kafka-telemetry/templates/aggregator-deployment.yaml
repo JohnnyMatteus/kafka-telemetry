@@ -1,0 +1,115 @@
+{{- if and .Values.autoscaling.enabled (gt (int .Values.autoscaling.minReplicas) (int .Values.kafka.partitions)) }}
+{{- fail "autoscaling.minReplicas não pode passar de kafka.partitions: réplicas além das partições ficam ociosas" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kt.fullname" . }}-aggregator
+  labels:
+    {{- include "kt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: aggregator
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.aggregator.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "kt.selector" . | nindent 6 }}
+      app.kubernetes.io/component: aggregator
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "kt.selector" . | nindent 8 }}
+        app.kubernetes.io/component: aggregator
+      {{- with .Values.aggregator.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "kt.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      # Parada limpa: o lote em andamento termina (10 s de graça no consumidor) e o
+      # grupo faz o rebalance sem perder o commit.
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: aggregator
+          image: {{ include "kt.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["aggregator"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 9102
+          env:
+            {{- include "kt.kafkaEnv" . | nindent 12 }}
+            - name: AGGREGATOR_GROUP
+              value: {{ .Values.kafka.consumerGroup | quote }}
+            - name: METRICS_ADDR
+              value: ":9102"
+            - name: REDIS_ADDR
+              value: {{ .Values.redis.addr | quote }}
+            - name: WINDOW_SIZE
+              value: {{ .Values.aggregator.window.size | quote }}
+            - name: ALLOWED_LATENESS
+              value: {{ .Values.aggregator.window.allowedLateness | quote }}
+            - name: WATERMARK_SCOPE
+              value: {{ .Values.aggregator.window.watermarkScope | quote }}
+            - name: WATERMARK_IDLE_TIMEOUT
+              value: {{ .Values.aggregator.window.watermarkIdleTimeout | quote }}
+            {{- if .Values.secrets.aggregator }}
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.aggregator }}
+                  key: POSTGRES_DSN
+                  optional: true
+            - name: OPERATOR_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.aggregator }}
+                  key: OPERATOR_TOKENS
+                  optional: true
+            {{- end }}
+            {{- with .Values.aggregator.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.aggregator.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "kt.secureVolumeMounts" . | nindent 12 }}
+      {{- if or .Values.kafka.security.enabled .Values.schemaRegistry.auth.enabled }}
+      volumes:
+        {{- include "kt.secureVolumes" . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.aggregator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.aggregator.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.aggregator.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

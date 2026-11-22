@@ -1,0 +1,39 @@
+{{- if .Values.autoscaling.enabled }}
+{{- /* Réplicas além das partições não consomem nada: o teto é o menor entre maxReplicas e as partições. */}}
+{{- $max := min (int .Values.autoscaling.maxReplicas) (int .Values.kafka.partitions) }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "kt.fullname" . }}-aggregator
+  labels:
+    {{- include "kt.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: {{ include "kt.fullname" . }}-aggregator
+  minReplicaCount: {{ .Values.autoscaling.minReplicas }}
+  maxReplicaCount: {{ $max }}
+  pollingInterval: {{ .Values.autoscaling.pollingInterval }}
+  cooldownPeriod: {{ .Values.autoscaling.cooldownPeriod }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: {{ .Values.autoscaling.scaleDownStabilizationSeconds }}
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 60
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: {{ .Values.kafka.brokers | quote }}
+        consumerGroup: {{ .Values.kafka.consumerGroup | quote }}
+        topic: {{ .Values.kafka.readingsTopic | quote }}
+        lagThreshold: {{ .Values.autoscaling.lagThreshold | quote }}
+        offsetResetPolicy: earliest
+        allowIdleConsumers: "false"
+      {{- if .Values.autoscaling.authenticationRef }}
+      authenticationRef:
+        name: {{ .Values.autoscaling.authenticationRef | quote }}
+      {{- end }}
+{{- end }}

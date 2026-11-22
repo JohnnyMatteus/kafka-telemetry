@@ -1,0 +1,53 @@
+groups:
+  - name: slo-recording
+    interval: 30s
+    rules:
+      # Lag em segundos: registros em atraso divididos pela vazão de consumo dos últimos 5 min.
+      # Sem tráfego a vazão é limitada a 1 registro/s, então o lag zero continua dentro da meta.
+      - record: slo:consumer_lag_seconds
+        expr: sum(telemetry_aggregator_consumer_lag) / clamp_min(sum(rate(telemetry_aggregator_records_consumed_total[5m])), 1)
+      - record: slo:consumer_lag_ok
+        expr: slo:consumer_lag_seconds < bool 30
+      - record: slo:latency_good_ratio:rate5m
+        expr: sum(rate(telemetry_aggregator_end_to_end_latency_seconds_bucket{le="65.536"}[5m])) / sum(rate(telemetry_aggregator_end_to_end_latency_seconds_count[5m]))
+      - record: slo:latency_good_ratio:rate30m
+        expr: sum(rate(telemetry_aggregator_end_to_end_latency_seconds_bucket{le="65.536"}[30m])) / sum(rate(telemetry_aggregator_end_to_end_latency_seconds_count[30m]))
+      - record: slo:latency_good_ratio:rate1h
+        expr: sum(rate(telemetry_aggregator_end_to_end_latency_seconds_bucket{le="65.536"}[1h])) / sum(rate(telemetry_aggregator_end_to_end_latency_seconds_count[1h]))
+      - record: slo:latency_good_ratio:rate6h
+        expr: sum(rate(telemetry_aggregator_end_to_end_latency_seconds_bucket{le="65.536"}[6h])) / sum(rate(telemetry_aggregator_end_to_end_latency_seconds_count[6h]))
+      - record: slo:dlq_ratio:rate5m
+        expr: sum(rate(telemetry_aggregator_dead_letters_total[5m])) / clamp_min(sum(rate(telemetry_aggregator_records_consumed_total[5m])), 1e-9)
+
+  - name: slo-alerts
+    rules:
+      - alert: SLOLagBurnFast
+        expr: (1 - avg_over_time(slo:consumer_lag_ok[5m])) / 0.01 > 14.4 and (1 - avg_over_time(slo:consumer_lag_ok[1h])) / 0.01 > 14.4
+        for: 2m
+        labels: { severity: critical, slo: lagburn }
+        annotations:
+          summary: "SLO de lag (99% do tempo com lag estimado abaixo de 30 s): orçamento de erro do mês queimando 14,4 vezes mais rápido que o permitido (esgota em cerca de 2 dias)"
+      - alert: SLOLagBurnSlow
+        expr: (1 - avg_over_time(slo:consumer_lag_ok[30m])) / 0.01 > 6 and (1 - avg_over_time(slo:consumer_lag_ok[6h])) / 0.01 > 6
+        for: 15m
+        labels: { severity: warning, slo: lagburn }
+        annotations:
+          summary: "SLO de lag (99% do tempo com lag estimado abaixo de 30 s): orçamento de erro do mês queimando 6 vezes mais rápido que o permitido (esgota em cerca de 5 dias)"
+      - alert: SLOLatencyBurnFast
+        expr: (1 - slo:latency_good_ratio:rate5m) / 0.01 > 14.4 and (1 - slo:latency_good_ratio:rate1h) / 0.01 > 14.4
+        for: 2m
+        labels: { severity: critical, slo: latencyburn }
+        annotations:
+          summary: "SLO de latência (99% das leituras processadas em até 65,5 s da medição): orçamento de erro do mês queimando 14,4 vezes mais rápido que o permitido (esgota em cerca de 2 dias)"
+      - alert: SLOLatencyBurnSlow
+        expr: (1 - slo:latency_good_ratio:rate30m) / 0.01 > 6 and (1 - slo:latency_good_ratio:rate6h) / 0.01 > 6
+        for: 15m
+        labels: { severity: warning, slo: latencyburn }
+        annotations:
+          summary: "SLO de latência (99% das leituras processadas em até 65,5 s da medição): orçamento de erro do mês queimando 6 vezes mais rápido que o permitido (esgota em cerca de 5 dias)"
+      - alert: SLODeadLetterRate
+        expr: slo:dlq_ratio:rate5m > 0.01
+        for: 15m
+        labels: { severity: warning, slo: deadletter }
+        annotations:
+          summary: "Taxa de DLQ acima de 1% por 15 minutos (SLO de DLQ)"

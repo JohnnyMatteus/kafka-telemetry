@@ -6,7 +6,9 @@
 | --- | --- | --- |
 | Simulador | `http://localhost:9101/metrics` | `/healthz` |
 | Agregador | `http://localhost:9102/metrics` | `/healthz` |
+| Notificador | `http://127.0.0.1:9103/metrics` | `/healthz` |
 | Prometheus | `http://localhost:9090` (profile `observability`) | `/-/healthy` |
+| Grafana | `http://127.0.0.1:3000` (profile `observability`; usuário `admin`, senha `GRAFANA_ADMIN_PASSWORD`, padrão `dev-only-change-me`) | `/api/health` |
 | Jaeger | `http://localhost:16686` (profile `observability`) | |
 
 ## Métricas do agregador
@@ -25,6 +27,8 @@
 | `telemetry_aggregator_committed_offset{topic,partition}` | gauge | Progresso do commit. |
 | `telemetry_aggregator_end_to_end_latency_seconds` | histogram | Do `measured_at` até o processamento. |
 | `telemetry_aggregator_batch_duration_seconds` | histogram | Lote completo: processamento, publish, checkpoint e commit. |
+| `telemetry_aggregator_idle_windows_closed_total` | counter | Janelas fechadas pelo watermark ocioso ([ADR 0014](adr/0014-watermark-por-estufa-e-ocioso.md)). |
+| `telemetry_aggregator_state_updates_total{result}` | counter | Gravações do último estado no Redis, por resultado. |
 
 ## Métricas do simulador
 
@@ -33,6 +37,36 @@
 | `telemetry_simulator_readings_produced_total{sensor_type}` | counter (só leituras confirmadas pelo broker) |
 | `telemetry_simulator_produce_errors_total` | counter |
 | `telemetry_simulator_produce_ack_latency_seconds` | histogram (acks=all) |
+
+## Métricas do notificador
+
+| Métrica | Tipo | Para que serve |
+| --- | --- | --- |
+| `telemetry_notifier_notifications_total{channel,outcome}` | counter | Avisos por canal e resultado: `sent`, `duplicate`, `queued`, `failed`, `expired`, `permanent_failure`, `no_recipient`, `undecodable`. |
+| `telemetry_notifier_retry_queue_depth` | gauge | Avisos esperando nova tentativa. |
+| `telemetry_notifier_retry_oldest_age_seconds` | gauge | Idade do aviso mais antigo na fila. |
+| `telemetry_notifier_alerts_consumed_total`, `telemetry_notifier_consumer_lag`, `telemetry_notifier_batch_duration_seconds` | counter, gauge, histogram | Consumo do tópico de alertas. |
+
+## Dashboards (Grafana)
+
+Versionados em `deploy/grafana/dashboards` e provisionados sem edição pela interface (`deploy/grafana/provisioning`): **Telemetria: pipeline** (vazão, lag, latência, destino das leituras, DLQ, estado em memória), **Telemetria: SLOs** (orçamento de erro e burn rate) e **Telemetria: notificador** (avisos, fila de retry). Suba com `make up` (o profile `observability` inclui o Grafana). O teste `internal/hygiene` falha se um dashboard ou uma regra citar uma métrica que nenhum código registra, se uma série `slo:*` do dashboard não tiver regra de gravação, ou se o bucket do SLO de latência não existir no histograma.
+
+## SLOs
+
+Regras de gravação e alertas em `deploy/prometheus/slo.yml`, com alertas de **burn rate em duas janelas** (rápido: 5 min e 1 h acima de 14,4 vezes, crítico; lento: 30 min e 6 h acima de 6 vezes, aviso), sobre um orçamento de 1% em 30 dias.
+
+| SLO | SLI | Meta | Alertas |
+| --- | --- | --- | --- |
+| Lag | `slo:consumer_lag_seconds` (lag total dividido pela vazão de consumo dos últimos 5 min) abaixo de 30 s, medido por amostra (`slo:consumer_lag_ok`) | 99% do tempo | `SLOLagBurnFast`, `SLOLagBurnSlow` |
+| Latência | fração das leituras processadas em até 65,5 s da medição (`slo:latency_good_ratio:rate*`) | 99% | `SLOLatencyBurnFast`, `SLOLatencyBurnSlow` |
+| DLQ | `slo:dlq_ratio:rate5m` abaixo de 1% | 1% | `SLODeadLetterRate` (15 min) |
+
+Limites, para não confiar no que o SLO não mede:
+
+- A meta de latência de 90 s do plano antigo incluía a espera da janela; o histograma mede cada leitura da medição ao processamento e **não** inclui essa espera. A meta de 65,5 s é o maior bucket abaixo de 90 s. O atraso até o **agregado** sair (janela mais tolerância, cerca de 70 s) não tem métrica e não está no SLO.
+- O lag em segundos é uma estimativa (registros em atraso pela vazão recente). O gauge de lag só é atualizado quando um lote chega; um consumidor parado não o atualiza, então `AggregatorStalled` continua sendo o alerta para esse caso.
+- Sem tráfego, a razão de latência é indefinida (0/0) e os alertas de latência não disparam; a vazão mínima de 1 registro/s mantém o lag zero dentro da meta.
+- As regras foram escritas e verificadas só contra os nomes de métrica e de bucket do código. **A sintaxe PromQL é validada pelo `promtool` no CI** (job `prometheus-rules`); não foi executada localmente.
 
 ## Consultas úteis
 
@@ -54,7 +88,7 @@ histogram_quantile(0.99, rate(telemetry_aggregator_end_to_end_latency_seconds_bu
 sum(rate(telemetry_aggregator_dead_letters_total[5m])) / sum(rate(telemetry_aggregator_records_consumed_total[5m]))
 ```
 
-Alertas versionados em `deploy/prometheus/alerts.yml`: `AggregatorLagHigh`, `AggregatorStalled` e `DeadLetterRateHigh`.
+Alertas versionados em `deploy/prometheus/alerts.yml`: `AggregatorLagHigh`, `AggregatorStalled`, `DeadLetterRateHigh`, `NotifierRetryQueueStale` e `NotifierDeliveryExpired`; os de SLO ficam em `slo.yml`.
 
 ## Logs
 
@@ -66,13 +100,13 @@ Com `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318` e o profile `observability`
 
 ## Métricas de entrega (Tech Metrics)
 
-Além das métricas do sistema, o repositório acompanha as quatro métricas DORA a partir do histórico do GitHub, para medir o fluxo de entrega do próprio pipeline:
+O fluxo de entrega do repositório tem estas **metas**, acompanhadas à mão a partir do histórico do GitHub. **Não há automação que as meça**: nenhum script, painel ou job calcula frequência, lead time, falha ou restauração; as metas só valem se alguém olhar.
 
-| Métrica | Como medir aqui | Meta inicial |
+| Métrica | Como medir | Meta inicial |
 | --- | --- | --- |
 | Frequência de deploy | Merges na `main` com CI verde por semana | ≥ 2 |
 | Lead time de mudança | Do primeiro commit da branch ao merge | < 2 dias |
 | Taxa de falha de mudança | Reverts ou hotfixes / merges | < 15% |
 | Tempo de restauração | Da abertura de issue `bug` com impacto em garantia até o fix na `main` | < 1 dia |
 
-E SLIs do pipeline que viram SLOs no plano de evolução: lag p99 < 30 s, latência fim a fim p99 < 90 s (inclui a janela de 1 min) e taxa de DLQ < 1%.
+Os SLOs do pipeline (lag, latência e DLQ) estão definidos acima.

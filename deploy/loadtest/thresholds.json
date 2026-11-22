@@ -1,0 +1,16 @@
+{
+  "comentario": "Pisos absolutos e tolerância de regressão do teste de carga noturno. Os valores são hipóteses conservadoras para um runner do GitHub, ainda não calibradas (nenhuma rodada formal foi executada); ajuste depois das primeiras execuções noturnas.",
+  "absolute": {
+    "min_throughput_ratio": 0.8,
+    "max_ack_p99_ms": 1000,
+    "max_errors": 0,
+    "min_consumed_ratio": 0.99,
+    "max_drain_seconds": 120
+  },
+  "regression": {
+    "throughput_drop_pct": 15,
+    "ack_p99_increase_pct": 50,
+    "lag_max_increase_pct": 100,
+    "drain_increase_pct": 100
+  }
+}

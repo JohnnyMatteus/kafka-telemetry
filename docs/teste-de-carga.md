@@ -48,8 +48,12 @@ Problemas encontrados e corrigidos nessa rodada: o healthcheck do Kafka herdava 
 
 Métricas a acompanhar na rodada formal: throughput efetivo do produtor contra o pedido (se ficar abaixo, o gargalo é o produtor ou o broker), latência de ack p99, lag máximo do agregador e tempo de drenagem depois do fim da carga. O agregador processa cada partição em sequência num único laço; se o lag não drenar, o próximo passo é escalar instâncias até o número de partições, já que o estado é por partição e o checkpoint permite a troca de dono sem perda.
 
+## Teste de carga noturno no CI
+
+`.github/workflows/nightly-load.yml` roda todo dia (e sob demanda) na branch padrão: sobe o agregador e as dependências, roda `scripts/load-test.sh` (1000 leituras/s por 60 s com 100 estufas por padrão) e `scripts/loadtest-check.sh`, que compara `loadtest-results/latest.json` com `deploy/loadtest/thresholds.json` e com a última execução aprovada. Reprova por: vazão efetiva abaixo de 80% do pedido, ack p99 acima de 1 s, qualquer erro de produção, consumo abaixo de 99% do confirmado, lag que não zera em 120 s, ou regressão (queda de vazão acima de 15%, alta de p99 acima de 50%, de lag máximo ou de drenagem acima de 100%). **Esse job nunca rodou e os limiares são hipóteses**; veja o [ADR 0017](adr/0017-helm-e-autoscaling-pelo-lag.md). O resultado fica como artefato da execução.
+
 ## Próximos passos
 
-- Rodar no CI noturno com um limiar de regressão de throughput.
+- Calibrar os limiares do teste noturno com as primeiras execuções.
 - Medir com 3 brokers, RF=3 e `min.insync.replicas=2`, onde `acks=all` custa uma ida e volta de replicação.
 - Escalar o agregador para várias instâncias (até o número de partições) e medir o tempo de rebalance com checkpoint.

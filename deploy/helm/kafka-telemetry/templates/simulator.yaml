@@ -1,0 +1,44 @@
+{{- if .Values.simulator.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kt.fullname" . }}-simulator
+  labels:
+    {{- include "kt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: simulator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "kt.selector" . | nindent 6 }}
+      app.kubernetes.io/component: simulator
+  template:
+    metadata:
+      labels:
+        {{- include "kt.selector" . | nindent 8 }}
+        app.kubernetes.io/component: simulator
+    spec:
+      serviceAccountName: {{ include "kt.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: simulator
+          image: {{ include "kt.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["simulator"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            {{- include "kt.kafkaEnv" . | nindent 12 }}
+            - name: SIM_GREENHOUSES
+              value: {{ .Values.simulator.greenhouses | quote }}
+            - name: SIM_RATE
+              value: {{ .Values.simulator.rate | quote }}
+          volumeMounts:
+            {{- include "kt.secureVolumeMounts" . | nindent 12 }}
+      {{- if or .Values.kafka.security.enabled .Values.schemaRegistry.auth.enabled }}
+      volumes:
+        {{- include "kt.secureVolumes" . | nindent 8 }}
+      {{- end }}
+{{- end }}

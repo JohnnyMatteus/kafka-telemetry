@@ -1,0 +1,8 @@
+Agregador: {{ include "kt.fullname" . }}-aggregator (métricas em :9102/metrics).
+{{- if .Values.autoscaling.enabled }}
+Autoscaling pelo lag (KEDA): de {{ .Values.autoscaling.minReplicas }} a {{ min (int .Values.autoscaling.maxReplicas) (int .Values.kafka.partitions) }} réplicas, alvo de {{ .Values.autoscaling.lagThreshold }} registros em atraso por réplica.
+Confirme que o KEDA está instalado: kubectl get crd scaledobjects.keda.sh
+{{- else }}
+Autoscaling desligado: {{ .Values.aggregator.replicas }} réplicas fixas.
+{{- end }}
+Este chart não cria Secrets. Informe os existentes em secrets.*, kafka.security.secretName e schemaRegistry.auth.secretName.

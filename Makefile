@@ -48,6 +48,19 @@ clean: ## Remove containers, volumes e binários locais
 	rm -f coverage.out
 	rm -f bin/simulator bin/aggregator bin/telemetryctl
 
+.PHONY: secure-init
+secure-init: ## Gera CA, certificados, senhas e JAAS do profile secure em .secure/ (não versionado)
+	./scripts/secure-init.sh
+
+.PHONY: up-secure
+up-secure: ## Sobe o profile secure: Kafka com TLS+mTLS+SASL+ACLs, registry autenticado, simulador, agregador e notificador
+	@test -f .secure/secure.env || (echo "rode make secure-init antes" && exit 1)
+	$(COMPOSE) --env-file .secure/secure.env --profile secure up -d --build
+
+.PHONY: down-secure
+down-secure: ## Para o profile secure (mantém os volumes)
+	$(COMPOSE) --profile secure down
+
 .PHONY: network
 network: ## Cria a rede compartilhada do ecossistema (portfolio-net)
 	docker network inspect portfolio-net >/dev/null 2>&1 || docker network create portfolio-net
