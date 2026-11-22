@@ -4,12 +4,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/alerting"
+	"github.com/JohnnyMatteus/kafka-telemetry/internal/dlq"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/history"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/observability"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/pipeline"
@@ -23,6 +25,11 @@ type StateReader interface {
 	state.Lister
 }
 
+// DLQReplayer reprocessa a DLQ; é implementado por dlq.Reprocessor.
+type DLQReplayer interface {
+	Run(ctx context.Context, req dlq.Request) (dlq.Result, error)
+}
+
 // Deps são as portas usadas pelas rotas. Uma porta nula desliga as rotas que
 // dependem dela, para o agregador rodar sem Redis, Postgres ou inspeção Kafka.
 type Deps struct {
@@ -30,6 +37,7 @@ type Deps struct {
 	Series     history.Repository
 	Alerts     alerting.Repository
 	DLQ        pipeline.DLQReader
+	Replay     DLQReplayer
 	Health     pipeline.HealthReporter
 	Thresholds telemetry.Thresholds
 	Logger     *slog.Logger
@@ -68,6 +76,9 @@ func Routes(d Deps) []observability.Route {
 	}
 	if d.DLQ != nil {
 		add("GET /dlq", h.dlq)
+	}
+	if d.Replay != nil {
+		add("POST /dlq/replay", h.replayDLQ)
 	}
 	if d.Health != nil {
 		add("GET /pipeline/health", h.pipelineHealth)

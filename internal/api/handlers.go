@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/alerting"
+	"github.com/JohnnyMatteus/kafka-telemetry/internal/dlq"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/history"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/state"
 )
@@ -206,6 +207,37 @@ func (h *handlers) dlq(w http.ResponseWriter, r *http.Request) {
 		out[i] = deadLetterJSON(m)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"messages": out})
+}
+
+// replayDLQ reprocessa a DLQ. O corpo escolhe só limite, motivo e dry_run;
+// o tópico de destino é da configuração. dry_run ausente vale true.
+func (h *handlers) replayDLQ(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Limit  int    `json:"limit"`
+		Reason string `json:"reason"`
+		DryRun *bool  `json:"dry_run"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields() // um "destination" no corpo é erro, não é ignorado
+	if err := dec.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "corpo JSON inválido")
+		return
+	}
+	res, err := h.Replay.Run(r.Context(), dlq.Request{
+		Operator: Operator(r.Context()), Limit: body.Limit, Reason: body.Reason,
+		Execute: body.DryRun != nil && !*body.DryRun,
+	})
+	switch {
+	case errors.Is(err, dlq.ErrBatchLimit), errors.Is(err, dlq.ErrUnknownReason):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, dlq.ErrBusy):
+		writeError(w, http.StatusConflict, "outro reprocessamento em andamento")
+	case err != nil:
+		h.unavailable(w, "reprocessamento da DLQ", err)
+	default:
+		writeJSON(w, http.StatusOK, res)
+	}
 }
 
 type thresholdJSON struct {
