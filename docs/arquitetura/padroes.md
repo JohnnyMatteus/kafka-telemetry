@@ -53,7 +53,7 @@ Só entra aqui o que o código tem de fato. Cada item aponta o trecho, o problem
 
 - **Onde**: a porta [notify.Channel](../../internal/notify/notify.go) com os adaptadores [EmailChannel](../../internal/notify/email.go) e [WebhookChannel](../../internal/notify/webhook.go); [notify.Service](../../internal/notify/notify.go) escolhe os canais de cada produtor; [RedisSent](../../internal/notify/redis.go) lembra o que já saiu. Decisão no [ADR 0013](../adr/0013-notificador-de-alertas.md).
 - **Problema**: acrescentar um canal sem mexer na regra de quem avisar nem na de não repetir.
-- **Trade-off**: marcar depois de enviar prefere um aviso repetido a um aviso perdido.
+- **Trade-off**: marcar depois de enviar prefere um aviso repetido a um aviso perdido; falha transitória vai para uma fila agendada no Redis com idade máxima ([retry.go](../../internal/notify/retry.go)), em vez de perder o aviso ao commitar o offset.
 
 ### Retry com backoff exponencial
 

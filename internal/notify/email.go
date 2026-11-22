@@ -2,7 +2,9 @@ package notify
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"mime"
@@ -29,7 +31,8 @@ func (c *EmailChannel) Address(r Recipient) string { return r.Email }
 
 // Send entrega uma mensagem. Resposta 5xx do servidor e endereço inválido são
 // permanentes; 4xx e falhas de rede são tentadas de novo.
-func (c *EmailChannel) Send(ctx context.Context, to string, m Message) error {
+func (c *EmailChannel) Send(ctx context.Context, r Recipient, m Message) error {
+	to := r.Email
 	rcpt, err := mail.ParseAddress(to)
 	if err != nil || strings.ContainsAny(to, "\r\n") {
 		return fmt.Errorf("%w: destinatário inválido", ErrPermanent)
@@ -91,13 +94,20 @@ func (c *EmailChannel) render(from, to *mail.Address, m Message) string {
 		"To: " + to.String(),
 		"Subject: " + mime.QEncoding.Encode("utf-8", sanitizeHeader(m.Subject)),
 		"Date: " + time.Now().UTC().Format(time.RFC1123Z),
-		"Message-ID: <" + m.Alert.ID + "@telemetry.example.com>",
+		// O id do alerta vem do tópico e não entra cru em cabeçalho: o Message-ID
+		// é um hash dele.
+		"Message-ID: <" + messageIDLocal(m.Alert.ID) + "@telemetry.example.com>",
 		"MIME-Version: 1.0",
 		"Content-Type: text/plain; charset=utf-8",
 		"Content-Transfer-Encoding: 8bit",
 		"X-Alert-ID: " + sanitizeHeader(m.Alert.ID),
 	}
 	return strings.Join(headers, "\r\n") + "\r\n\r\n" + strings.ReplaceAll(m.Body, "\n", "\r\n")
+}
+
+func messageIDLocal(alertID string) string {
+	sum := sha256.Sum256([]byte(alertID))
+	return hex.EncodeToString(sum[:16])
 }
 
 func sanitizeHeader(s string) string {

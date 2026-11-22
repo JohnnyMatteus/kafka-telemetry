@@ -19,9 +19,14 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: "Mais de 5% das leituras indo para a DLQ"
-      - alert: NotifierDeliveryFailing
-        expr: sum(increase(telemetry_notifier_notifications_total{outcome=~"failed|permanent_failure"}[10m])) > 0
+      - alert: NotifierRetryQueueStale
+        expr: telemetry_notifier_retry_oldest_age_seconds > 600
         for: 1m
         labels: { severity: warning }
         annotations:
-          summary: "Avisos de alerta não estão sendo entregues ao produtor rural"
+          summary: "Aviso de alerta esperando entrega há mais de 10 minutos (canal fora do ar?)"
+      - alert: NotifierDeliveryExpired
+        expr: sum(increase(telemetry_notifier_notifications_total{outcome=~"expired|permanent_failure"}[10m])) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "Aviso de alerta descartado sem ser entregue ao produtor rural"

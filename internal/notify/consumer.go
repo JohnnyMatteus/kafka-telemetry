@@ -65,11 +65,15 @@ func (c *Consumer) decode(ctx context.Context, rec aggregation.Record) (Alert, e
 	for {
 		err := c.Decoder.Decode(ctx, rec.Value, &payload)
 		if err == nil {
-			return Alert{
+			a := Alert{
 				ID: payload.AlertID, GreenhouseID: payload.GreenhouseID, SensorType: telemetry.SensorType(payload.SensorType),
 				Rule: telemetry.AlertRule(payload.Rule), WindowStart: payload.WindowStart, WindowEnd: payload.WindowEnd,
 				Observed: payload.ObservedValue, Limit: payload.LimitValue,
-			}, nil
+			}
+			if err := a.validate(); err != nil {
+				return Alert{}, err
+			}
+			return a, nil
 		}
 		if errors.Is(err, contract.ErrMalformed) || errors.Is(err, contract.ErrUnknownSchema) {
 			return Alert{}, err

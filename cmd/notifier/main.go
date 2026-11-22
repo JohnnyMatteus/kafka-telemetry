@@ -35,9 +35,11 @@ type settings struct {
 	smtpFrom     string
 	smtpUser     string
 	smtpPassword string
-	webhookKey   string
 	allowHTTP    bool
 	attempts     int
+	retryMaxAge  time.Duration
+	retryBase    time.Duration
+	retryEvery   time.Duration
 }
 
 func main() { os.Exit(realMain()) }
@@ -72,9 +74,11 @@ func load() (settings, error) {
 		smtpFrom:     env.String("NOTIFY_SMTP_FROM", "alertas@example.com"),
 		smtpUser:     env.String("NOTIFY_SMTP_USER", ""),
 		smtpPassword: env.String("NOTIFY_SMTP_PASSWORD", ""),
-		webhookKey:   env.String("NOTIFY_WEBHOOK_SECRET", ""),
 		allowHTTP:    env.String("NOTIFY_WEBHOOK_ALLOW_HTTP", "") == "true",
 		attempts:     env.Int("NOTIFY_MAX_ATTEMPTS", 5),
+		retryMaxAge:  env.Duration("NOTIFY_RETRY_MAX_AGE", 24*time.Hour),
+		retryBase:    env.Duration("NOTIFY_RETRY_BASE", 30*time.Second),
+		retryEvery:   env.Duration("NOTIFY_RETRY_INTERVAL", 5*time.Second),
 	}
 	if err := env.Err(); err != nil {
 		return s, err
@@ -84,23 +88,24 @@ func load() (settings, error) {
 		return s, errors.New("REDIS_ADDR é obrigatório: a idempotência dos avisos mora no Redis")
 	case s.recipients == "":
 		return s, errors.New("NOTIFY_RECIPIENTS_FILE é obrigatório")
-	case s.smtpAddr == "" && s.webhookKey == "":
-		return s, errors.New("nenhum canal ligado: informe NOTIFY_SMTP_ADDR e/ou NOTIFY_WEBHOOK_SECRET")
+	case s.retryEvery <= 0:
+		return s, errors.New("NOTIFY_RETRY_INTERVAL deve ser positivo")
 	}
 	return s, nil
 }
 
-func channels(s settings) ([]notify.Channel, error) {
+// channels liga o e-mail se houver SMTP e o webhook se algum produtor usa
+// webhook (cada um com o seu segredo, vindo de variável de ambiente).
+func channels(s settings, dir *notify.FileDirectory) ([]notify.Channel, error) {
 	var out []notify.Channel
 	if s.smtpAddr != "" {
 		out = append(out, &notify.EmailChannel{Addr: s.smtpAddr, From: s.smtpFrom, Username: s.smtpUser, Password: s.smtpPassword})
 	}
-	if s.webhookKey != "" {
-		wh, err := notify.NewWebhookChannel(s.webhookKey, s.allowHTTP)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, wh)
+	if dir.HasWebhooks() {
+		out = append(out, notify.NewWebhookChannel(s.allowHTTP))
+	}
+	if len(out) == 0 {
+		return nil, errors.New("nenhum canal ligado: informe NOTIFY_SMTP_ADDR ou cadastre produtores com webhook_url")
 	}
 	return out, nil
 }
@@ -113,15 +118,16 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	chans, err := channels(s)
+	chans, err := channels(s, dir)
 	if err != nil {
 		return err
 	}
 	rdb := redis.NewClient(&redis.Options{Addr: s.redisAddr})
 	defer func() { _ = rdb.Close() }()
 	svc, err := notify.New(notify.Deps{
-		Channels: chans, Directory: dir, Sent: notify.NewRedisSent(rdb), Observer: metrics, Logger: logger,
-		Retry: notify.Retry{Attempts: s.attempts},
+		Channels: chans, Directory: dir, Sent: notify.NewRedisSent(rdb), Retries: notify.NewRedisRetries(rdb), Observer: metrics, Logger: logger,
+		Retry:     notify.Retry{Attempts: s.attempts},
+		RetryPlan: notify.RetryPlan{Base: s.retryBase, MaxAge: s.retryMaxAge},
 	})
 	if err != nil {
 		return err
@@ -142,6 +148,7 @@ func run(ctx context.Context, s settings, logger *slog.Logger) error {
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return observability.Serve(gctx, s.metricsAddr, reg, logger) })
+	g.Go(func() error { return svc.RunRetries(gctx, s.retryEvery, metrics) })
 	g.Go(func() error {
 		logger.Info("notificador iniciado", "group", s.group, "topic", schemas.TopicAlerts, "channels", len(chans))
 		return consumer.Run(gctx, handler, metrics)

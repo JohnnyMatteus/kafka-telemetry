@@ -272,9 +272,10 @@ services:
     profiles: ["core"]
     image: axllent/mailpit:v1.21.8
     networks: [telemetry-net]
+    # Só a UI é publicada, e só no loopback: o SMTP (1025) fica na rede do
+    # compose, porque o Mailpit aceita qualquer remetente e destinatário.
     ports:
-      - "${MAILPIT_UI_PORT:-8025}:8025"
-      - "${MAILPIT_SMTP_PORT:-1025}:1025"
+      - "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"
     healthcheck:
       test: ["CMD", "/mailpit", "readyz"]
       interval: 10s
@@ -293,12 +294,11 @@ services:
       NOTIFY_RECIPIENTS_FILE: /etc/notifier/recipients.json
       NOTIFY_SMTP_ADDR: mailpit:1025
       NOTIFY_SMTP_FROM: alertas@example.com
-      NOTIFY_WEBHOOK_SECRET: ${NOTIFY_WEBHOOK_SECRET:-dev-only-webhook-secret}
-      NOTIFY_WEBHOOK_ALLOW_HTTP: ${NOTIFY_WEBHOOK_ALLOW_HTTP:-true}
+      NOTIFY_WEBHOOK_ALLOW_HTTP: ${NOTIFY_WEBHOOK_ALLOW_HTTP:-false}
     volumes:
       - ./deploy/notifier:/etc/notifier:ro
     ports:
-      - "${NOTIFIER_METRICS_PORT:-9103}:9103"
+      - "127.0.0.1:${NOTIFIER_METRICS_PORT:-9103}:9103"
     depends_on:
       init: { condition: service_completed_successfully }
       redis: { condition: service_healthy }

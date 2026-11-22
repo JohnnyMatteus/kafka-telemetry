@@ -31,26 +31,23 @@ const MinSecretLen = 16
 
 // WebhookChannel envia o alerta em JSON assinado com HMAC-SHA256.
 type WebhookChannel struct {
-	Secret []byte
 	Client *http.Client
 	// AllowHTTP aceita http:// (só para desenvolvimento local).
 	AllowHTTP bool
 	Now       func() time.Time
 }
 
-// NewWebhookChannel recusa segredo curto e devolve um cliente sem redirecionamento.
-func NewWebhookChannel(secret string, allowHTTP bool) (*WebhookChannel, error) {
-	if len(secret) < MinSecretLen {
-		return nil, fmt.Errorf("segredo do webhook precisa de %d ou mais caracteres", MinSecretLen)
-	}
+// NewWebhookChannel devolve um canal cujo cliente não segue redirecionamento.
+// O segredo de cada produtor vem do próprio Recipient.
+func NewWebhookChannel(allowHTTP bool) *WebhookChannel {
 	return &WebhookChannel{
-		Secret: []byte(secret), AllowHTTP: allowHTTP, Now: time.Now,
+		AllowHTTP: allowHTTP, Now: time.Now,
 		Client: &http.Client{
 			Timeout: 10 * time.Second,
 			// Um 3xx não é seguido: o destino cadastrado é o único que recebe o alerta.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
-	}, nil
+	}
 }
 
 func (c *WebhookChannel) Name() string { return "webhook" }
@@ -95,9 +92,13 @@ func Verify(secret []byte, timestamp, signature string, body []byte, now time.Ti
 	return nil
 }
 
-// Send faz o POST. 2xx é sucesso; 408, 429 e 5xx são tentados de novo;
+// Send faz o POST, assinado com o segredo do destinatário. 2xx é sucesso; 408, 429 e 5xx são tentados de novo;
 // qualquer outro status é permanente.
-func (c *WebhookChannel) Send(ctx context.Context, to string, m Message) error {
+func (c *WebhookChannel) Send(ctx context.Context, r Recipient, m Message) error {
+	to := r.WebhookURL
+	if len(r.WebhookSecret) < MinSecretLen {
+		return fmt.Errorf("%w: produtor sem segredo de webhook válido", ErrPermanent)
+	}
 	u, err := url.Parse(to)
 	if err != nil || u.Host == "" || (u.Scheme != "https" && (!c.AllowHTTP || u.Scheme != "http")) {
 		return fmt.Errorf("%w: URL do webhook deve ser https", ErrPermanent)
@@ -118,7 +119,7 @@ func (c *WebhookChannel) Send(ctx context.Context, to string, m Message) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(HeaderTimestamp, ts)
-	req.Header.Set(HeaderSignature, Sign(c.Secret, ts, body))
+	req.Header.Set(HeaderSignature, Sign([]byte(r.WebhookSecret), ts, body))
 	// O receptor pode deduplicar por este id se um aviso chegar duas vezes.
 	req.Header.Set(HeaderEventID, a.ID)
 	resp, err := c.Client.Do(req)

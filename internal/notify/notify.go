@@ -3,8 +3,9 @@
 // portas de canal (e-mail, webhook assinado), com idempotência por
 // alerta+canal+destinatário e retry com backoff.
 //
-// Entrega é at-least-once: o offset só é commitado depois de todos os canais
-// terem sido tentados, e o registro de avisos enviados no Redis evita o aviso
+// Entrega é at-least-once: o offset só é commitado depois de cada aviso ter
+// sido enviado, recusado em definitivo ou agendado numa fila de retry durável
+// (Redis, com idade máxima). O registro de avisos enviados evita o aviso
 // repetido quando o mesmo alerta chega de novo (restart do agregador, rebalance).
 package notify
 
@@ -13,8 +14,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"time"
 
+	"github.com/JohnnyMatteus/kafka-telemetry/internal/contract"
 	"github.com/JohnnyMatteus/kafka-telemetry/internal/telemetry"
 )
 
@@ -23,6 +26,8 @@ const (
 	OutcomeSent       = "sent"
 	OutcomeDuplicate  = "duplicate"
 	OutcomeFailed     = "failed"
+	OutcomeQueued     = "queued"
+	OutcomeExpired    = "expired"
 	OutcomePermanent  = "permanent_failure"
 	OutcomeNoContact  = "no_recipient"
 	OutcomeUndecoded  = "undecodable"
@@ -48,12 +53,28 @@ type Alert struct {
 	Limit        float64
 }
 
+var safeToken = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// validate recusa um alerta cujo id ou estufa não sejam identificadores
+// simples: o tópico aceita escritores além do agregador, e esses valores vão
+// para cabeçalhos de e-mail, chaves do Redis e o corpo do webhook.
+func (a Alert) validate() error {
+	if !safeToken.MatchString(a.ID) || !safeToken.MatchString(a.GreenhouseID) {
+		return fmt.Errorf("%w: alert_id ou greenhouse_id fora do formato", contract.ErrMalformed)
+	}
+	return nil
+}
+
 // Recipient é um produtor rural com seus contatos.
 type Recipient struct {
 	ID         string
 	Name       string
 	Email      string
 	WebhookURL string
+	// WebhookSecret assina os webhooks deste produtor. É um segredo por
+	// destinatário: quem o recebe para verificar não consegue forjar o
+	// alerta de outro. Nunca é logado.
+	WebhookSecret string
 }
 
 // Directory diz quem recebe os alertas de uma estufa.
@@ -73,7 +94,7 @@ type Message struct {
 type Channel interface {
 	Name() string
 	Address(r Recipient) string
-	Send(ctx context.Context, to string, m Message) error
+	Send(ctx context.Context, r Recipient, m Message) error
 }
 
 // Sent lembra, de forma durável, quais avisos já saíram. Só marca depois da
@@ -103,6 +124,10 @@ type Retry struct {
 
 // Deps reúne as dependências do serviço.
 type Deps struct {
+	// Retries é a fila durável das entregas que falharam por motivo transitório.
+	Retries   Retries
+	RetryPlan RetryPlan
+	Clock     func() time.Time
 	Channels  []Channel
 	Directory Directory
 	Sent      Sent
@@ -118,9 +143,13 @@ type Service struct{ deps Deps }
 
 // New valida as dependências.
 func New(deps Deps) (*Service, error) {
-	if len(deps.Channels) == 0 || deps.Directory == nil || deps.Sent == nil {
-		return nil, errors.New("notify: canais, diretório e registro de avisos são obrigatórios")
+	if len(deps.Channels) == 0 || deps.Directory == nil || deps.Sent == nil || deps.Retries == nil {
+		return nil, errors.New("notify: canais, diretório, registro de avisos e fila de retry são obrigatórios")
 	}
+	if deps.Clock == nil {
+		deps.Clock = time.Now
+	}
+	deps.RetryPlan = deps.RetryPlan.withDefaults()
 	if deps.Observer == nil {
 		deps.Observer = NopObserver{}
 	}
@@ -170,11 +199,10 @@ func (s *Service) Notify(ctx context.Context, a Alert) error {
 	msg := Compose(a)
 	for _, r := range recipients {
 		for _, ch := range s.deps.Channels {
-			to := ch.Address(r)
-			if to == "" {
+			if ch.Address(r) == "" {
 				continue
 			}
-			if err := s.deliver(ctx, ch, r, to, msg); err != nil {
+			if err := s.deliver(ctx, ch, r, msg); err != nil {
 				return err
 			}
 		}
@@ -182,8 +210,12 @@ func (s *Service) Notify(ctx context.Context, a Alert) error {
 	return nil
 }
 
-func (s *Service) deliver(ctx context.Context, ch Channel, r Recipient, to string, m Message) error {
-	key := keyPrefix + m.Alert.ID + ":" + ch.Name() + ":" + r.ID
+func dedupeKey(alertID, channel, recipientID string) string {
+	return keyPrefix + alertID + ":" + channel + ":" + recipientID
+}
+
+func (s *Service) deliver(ctx context.Context, ch Channel, r Recipient, m Message) error {
+	key := dedupeKey(m.Alert.ID, ch.Name(), r.ID)
 	done, err := s.deps.Sent.Has(ctx, key)
 	if err != nil {
 		return fmt.Errorf("consultar avisos enviados: %w", err)
@@ -192,7 +224,7 @@ func (s *Service) deliver(ctx context.Context, ch Channel, r Recipient, to strin
 		s.deps.Observer.Notified(ch.Name(), OutcomeDuplicate)
 		return nil
 	}
-	sendErr := s.sendWithRetry(ctx, ch, to, m)
+	sendErr := s.sendWithRetry(ctx, ch, r, m)
 	if sendErr == nil {
 		s.deps.Observer.Notified(ch.Name(), OutcomeSent)
 		if err := s.deps.Sent.Mark(ctx, key); err != nil {
@@ -203,20 +235,29 @@ func (s *Service) deliver(ctx context.Context, ch Channel, r Recipient, to strin
 	if ctx.Err() != nil {
 		return fmt.Errorf("aviso interrompido: %w", errors.Join(ctx.Err(), sendErr))
 	}
-	outcome := OutcomeFailed
 	if errors.Is(sendErr, ErrPermanent) {
-		outcome = OutcomePermanent
+		s.deps.Observer.Notified(ch.Name(), OutcomePermanent)
+		s.deps.Logger.Error("aviso recusado em definitivo", "alert_id", m.Alert.ID, "channel", ch.Name(), "recipient", r.ID, "error", sendErr)
+		return nil
 	}
-	s.deps.Observer.Notified(ch.Name(), outcome)
-	s.deps.Logger.Error("aviso não entregue", "alert_id", m.Alert.ID, "channel", ch.Name(), "recipient", r.ID, "outcome", outcome, "error", sendErr)
+	// Falha transitória que esgotou as tentativas rápidas: agenda um retry
+	// durável em vez de perder o aviso quando o offset for commitado.
+	now := s.deps.Clock()
+	job := Job{Key: key, Alert: m.Alert, Channel: ch.Name(), RecipientID: r.ID, Attempts: s.deps.Retry.Attempts,
+		FirstFailedAt: now, LastError: sendErr.Error()}
+	if err := s.deps.Retries.Enqueue(ctx, job, now.Add(s.deps.RetryPlan.delay(1))); err != nil {
+		return fmt.Errorf("agendar retry do aviso: %w", err)
+	}
+	s.deps.Observer.Notified(ch.Name(), OutcomeQueued)
+	s.deps.Logger.Warn("aviso agendado para nova tentativa", "alert_id", m.Alert.ID, "channel", ch.Name(), "recipient", r.ID, "error", sendErr)
 	return nil
 }
 
-func (s *Service) sendWithRetry(ctx context.Context, ch Channel, to string, m Message) error {
+func (s *Service) sendWithRetry(ctx context.Context, ch Channel, r Recipient, m Message) error {
 	backoff := s.deps.Retry.Backoff
 	var err error
 	for attempt := 1; attempt <= s.deps.Retry.Attempts; attempt++ {
-		if err = ch.Send(ctx, to, m); err == nil || errors.Is(err, ErrPermanent) || ctx.Err() != nil {
+		if err = ch.Send(ctx, r, m); err == nil || errors.Is(err, ErrPermanent) || ctx.Err() != nil {
 			return err
 		}
 		s.deps.Logger.Warn("falha ao avisar, tentando de novo", "channel", ch.Name(), "attempt", attempt, "error", err)
