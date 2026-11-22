@@ -19,11 +19,12 @@ export function useSeries(id: MaybeRefOrGetter<string>, hours: MaybeRefOrGetter<
   })
 }
 
-export const useAlerts = (status: MaybeRefOrGetter<'open' | 'acknowledged'>) =>
+export const useAlerts = (status: MaybeRefOrGetter<'open' | 'acknowledged'>, enabled: MaybeRefOrGetter<boolean> = true) =>
   useQuery({
     queryKey: computed(() => ['alerts', toValue(status)]),
     queryFn: () => api.alerts(toValue(status)),
     refetchInterval: 10_000,
+    enabled: computed(() => toValue(enabled)),
   })
 
 export function useAcknowledge() {

@@ -79,7 +79,7 @@ async function confirm() {
           média {{ formatNumber(a.observed_value, 1) }} {{ UNITS[a.sensor_type] }} · desde {{ formatDateTime(a.window_start) }}
         </div>
         <div v-if="a.acknowledged_at" class="text-caption mt-1">
-          Reconhecido em {{ formatDateTime(a.acknowledged_at) }}<span v-if="a.note">: {{ a.note }}</span>
+          Reconhecido<span v-if="a.acknowledged_by"> por {{ a.acknowledged_by }}</span> em {{ formatDateTime(a.acknowledged_at) }}<span v-if="a.note">: {{ a.note }}</span>
         </div>
       </div>
       <v-btn v-if="!a.acknowledged_at" color="primary" @click="start(a)">Reconhecer</v-btn>

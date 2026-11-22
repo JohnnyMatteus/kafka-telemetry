@@ -1,5 +1,6 @@
 import { FetchError, ofetch } from 'ofetch'
 import type { z } from 'zod'
+import { clearOperatorToken, operatorToken } from '@/auth/session'
 import {
   alertsResponse,
   alertSchema,
@@ -21,7 +22,22 @@ export class ApiError extends Error {
   }
 }
 
-const http = ofetch.create({ baseURL: '/api', retry: 0 })
+const http = ofetch.create({
+  baseURL: '/api',
+  retry: 0,
+  onRequest({ options }) {
+    // O login já passa o próprio header; a sessão guardada só preenche quando falta.
+    const headers = new Headers(options.headers)
+    if (operatorToken.value && !headers.has('Authorization')) {
+      headers.set('Authorization', `Bearer ${operatorToken.value}`)
+      options.headers = headers
+    }
+  },
+  onResponseError({ response }) {
+    // Token expirou, foi revogado ou trocado: a tela volta ao login pelo guard de rota.
+    if (response.status === 401) clearOperatorToken()
+  },
+})
 
 // Valida na fronteira: resposta fora do contrato vira erro explícito, não dado torto na tela.
 async function request<S extends z.ZodType>(schema: S, path: string, options?: Parameters<typeof http>[1]) {
@@ -34,6 +50,9 @@ async function request<S extends z.ZodType>(schema: S, path: string, options?: P
 }
 
 export const api = {
+  // Confere o token contra uma rota protegida barata antes de guardá-lo na sessão.
+  login: (token: string) =>
+    request(thresholdsResponse, '/thresholds', { headers: { Authorization: `Bearer ${token}` } }).then(() => undefined),
   greenhouses: () => request(greenhousesResponse, '/greenhouses').then((r) => r.greenhouses),
   series: (id: string, from: Date, to: Date) =>
     request(seriesResponse, `/greenhouses/${encodeURIComponent(id)}/series`, {

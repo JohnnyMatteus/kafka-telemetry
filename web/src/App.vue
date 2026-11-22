@@ -1,22 +1,40 @@
 <script setup lang="ts">
-import { mdiWeatherNight, mdiWhiteBalanceSunny } from '@mdi/js'
+import { mdiLogout, mdiWeatherNight, mdiWhiteBalanceSunny } from '@mdi/js'
 import { useStorage } from '@vueuse/core'
-import { computed, watchEffect } from 'vue'
+import { useQueryClient } from '@tanstack/vue-query'
+import { computed, watch, watchEffect } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useTheme } from 'vuetify'
 import { useAlerts } from '@/api/queries'
+import { clearOperatorToken, operatorToken } from '@/auth/session'
 
 const theme = useTheme()
 const mode = useStorage<'canteiroLight' | 'canteiroDark'>('canteiro-tema', 'canteiroLight')
 watchEffect(() => theme.change(mode.value))
 const dark = computed(() => mode.value === 'canteiroDark')
 
-const open = useAlerts('open')
+const route = useRoute()
+const router = useRouter()
+const queryClient = useQueryClient()
+
+const open = useAlerts('open', () => operatorToken.value !== null)
 const openCount = computed(() => open.data.value?.length ?? 0)
+
+// Sair, ou token rejeitado (401), derruba o cache e volta ao login de onde parou.
+watch(operatorToken, (token) => {
+  if (token) return
+  queryClient.clear()
+  router.push({ name: 'login', query: { redirect: route.fullPath } })
+})
+
+function logout() {
+  clearOperatorToken()
+}
 </script>
 
 <template>
   <v-app>
-    <v-app-bar border="b">
+    <v-app-bar v-if="!route.meta.public" border="b">
       <router-link to="/" class="text-decoration-none d-flex align-center ml-4 mr-6" style="color: inherit">
         <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true" class="mr-2">
           <rect x="0" y="0" width="10" height="10" fill="rgb(var(--v-theme-primary))" />
@@ -41,6 +59,9 @@ const openCount = computed(() => open.data.value?.length ?? 0)
         @click="mode = dark ? 'canteiroLight' : 'canteiroDark'"
       >
         <v-icon :icon="dark ? mdiWhiteBalanceSunny : mdiWeatherNight" />
+      </v-btn>
+      <v-btn v-if="operatorToken" icon variant="text" aria-label="Sair" class="mr-2" @click="logout">
+        <v-icon :icon="mdiLogout" />
       </v-btn>
     </v-app-bar>
     <v-main>

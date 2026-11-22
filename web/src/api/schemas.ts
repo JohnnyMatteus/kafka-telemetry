@@ -54,6 +54,7 @@ export const alertSchema = z.object({
   observed_value: z.number(),
   limit_value: z.number(),
   acknowledged_at: date.nullable(),
+  acknowledged_by: z.string().nullable(),
   note: z.string().nullable(),
 })
 export type Alert = z.infer<typeof alertSchema>
